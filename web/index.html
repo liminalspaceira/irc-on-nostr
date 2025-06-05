@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IRC on Nostr</title>
+    <meta name="description" content="Decentralized IRC-like chat application built on Nostr protocol">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background-color: #1a1a2e;
+            color: #ffffff;
+            overflow: hidden;
+        }
+        
+        #root {
+            height: 100vh;
+            width: 100vw;
+        }
+        
+        .loading {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: #1a1a2e;
+        }
+        
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #334155;
+            border-top: 4px solid #0066cc;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .loading-text {
+            margin-top: 16px;
+            color: #94a3b8;
+            font-size: 16px;
+        }
+        
+        /* Hide scrollbars but allow scrolling */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: #16213e;
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: #334155;
+            border-radius: 3px;
+        }
+        
+        ::-webkit-scrollbar-thumb:hover {
+            background: #475569;
+        }
+    </style>
+</head>
+<body>
+    <div id="root">
+        <div class="loading">
+            <div class="spinner"></div>
+            <div class="loading-text">Loading IRC on Nostr...</div>
+        </div>
+    </div>
+    
+    <script>
+        // Basic polyfills for web
+        if (typeof global === 'undefined') {
+            var global = window;
+        }
+        
+        // Prevent right-click context menu in production
+        if (window.location.hostname !== 'localhost') {
+            document.addEventListener('contextmenu', e => e.preventDefault());
+        }
+    </script>
+</body>
+</html>
