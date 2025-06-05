@@ -30,7 +30,17 @@ export const DEFAULT_RELAYS = [
   'wss://nostr-pub.wellorder.net',
   'wss://relay.current.fyi',
   'wss://nostr.wine',
-  'wss://eden.nostr.land'
+  'wss://eden.nostr.land',
+  // Additional relays
+  'wss://relay.nostr.info',
+  'wss://nostr.zebedee.cloud',
+  'wss://relay.nostrgraph.net',
+  'wss://nostr.fmt.wiz.biz',
+  'wss://relay.nostr.bg',
+  'wss://nostr.oxtr.dev',
+  'wss://nostr.bitcoiner.social',
+  'wss://relay.nostr.com',
+  'wss://nostr.mutinywallet.com'
 ];
 
 // IRC Commands
