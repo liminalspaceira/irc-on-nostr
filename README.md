@@ -4,28 +4,139 @@ A decentralized IRC-like chat application built on the Nostr protocol, bringing 
 
 ## Features
 
-### Core IRC Features
-- **Public Channels**: Create and join chat rooms using Nostr NIP-28
-- **Private Messages**: Direct encrypted messaging via NIP-04
-- **User Operations**: Channel operators with moderation powers
-- **Bot Framework**: Extensible bot system for commands and automation
-- **Classic Commands**: Traditional IRC commands like `/join`, `/part`, `/kick`, `/ban`
+### 🏗️ Core IRC Architecture
+- **Public Channels**: Create and join chat rooms using Nostr NIP-28 protocol
+- **Real-time Messaging**: Live message streaming with WebSocket subscriptions  
+- **Channel Discovery**: Search and browse public channels across the entire Nostr network
+- **Channel Creation**: Full channel creation with metadata, topics, and descriptions
+- **User Operations**: Channel operators with comprehensive moderation powers
+- **Classic IRC Navigation**: Traditional IRC workflow with modern UI
 
-### IRC Commands
-- `!users` - List active users in channel
-- `!uptime` - Show bot/room statistics
-- `!weather [location]` - Get weather information
-- `!roll [dice]` - Roll dice for games
-- `!help` - Show available commands
-- `!stats` - Channel statistics
-- `!topic [text]` - Set/view channel topic
+### 🤖 Comprehensive Bot System (15 Commands)
 
-### Modern Enhancements
-- **Cryptographic Identity**: Secure user authentication via Nostr keys
-- **Decentralized**: No single point of failure
-- **Cross-Platform**: React Native app for mobile and web
-- **Rich Media**: Support for images, links, and emojis
-- **Persistent History**: Messages stored across multiple relays
+#### 🛠️ Helper & Information Commands
+- `!help [command]` - Show comprehensive help or specific command help with examples
+- `!commands` - List all available bot and IRC commands with descriptions  
+- `!about` - Show detailed information about the IRC on Nostr system and features
+- `!time` - Show current server time with timezone information and Unix timestamp
+
+#### 📊 Statistics & Monitoring Commands  
+- `!stats` - Detailed channel statistics with message counts and user activity
+- `!uptime` - Show bot uptime, framework status, and operational statistics
+
+#### 🌤️ Weather Information Commands
+- `!weather [location]` - Get current weather with real OpenWeatherMap API or simulated data
+- `!forecast [location]` - Get detailed 3-day weather forecast with conditions
+
+#### 🎮 Gaming & Entertainment Commands
+- `!roll [dice]` - Advanced dice rolling with D&D notation (`2d6+3`, `d20`, modifiers, critical detection)
+- `!flip` - Flip a coin with heads/tails results
+- `!8ball [question]` - Magic 8-ball with 20 different mystical responses
+- `!rps [choice]` - Play rock-paper-scissors against the bot with emoji responses
+- `!number [range]` - Generate random numbers with custom ranges (`1-100`, `50`)
+
+### 📋 IRC Command System (8 Commands)
+
+#### 🏛️ Channel Management Commands
+- `/help` - Show IRC commands help with available operations
+- `/users` - List active channel users with last seen timestamps  
+- `/topic [text]` - Set/view channel topic (operators only)
+
+#### 👑 Moderation Commands (Operators Only)
+- `/kick [user] [reason]` - Remove user from channel with optional reason
+- `/ban [user] [reason]` - Ban user from channel with optional reason  
+- `/op [user]` - Grant operator status to user
+- `/deop [user]` - Remove operator status from user
+
+#### 💬 Communication Commands
+- `/msg [username|pubkey|npub] [message]` - Send private message with username resolution
+
+### 🔧 Advanced Bot Architecture
+- **Modular Framework**: Extensible BaseBot class with plugin registration system
+- **4 Specialized Bots**: WeatherBot, GameBot, StatsBot, HelperBot with distinct capabilities
+- **Command Registration**: Dynamic command discovery and registration system
+- **Error Handling**: Graceful error handling with user-friendly feedback messages
+- **Response Types**: Structured bot responses with metadata and rich formatting
+- **Caching System**: Smart caching for weather data and API responses
+- **Statistics Tracking**: Real-time tracking of bot usage and channel activity
+
+### 🌐 Modern Social Media Features
+- **Feed System**: Timeline view of posts from followed users with threaded discussions
+- **Social Interactions**: Like, repost, and reply to posts with real-time counts
+- **Profile Management**: Complete Nostr profile editing with picture, bio, website
+- **Following System**: Follow/unfollow users with follower/following counts  
+- **Post Creation**: Create and share text notes with image support and markdown
+- **Interaction Analytics**: Real-time like, repost, and reply counts with user indicators
+- **Thread Display**: Intelligent thread organization with followed/unfollowed reply separation
+
+### 🔐 Private Messaging & Communication
+- **NIP-04 Encrypted Messages**: End-to-end encrypted private conversations
+- **Conversation Management**: Organized conversation list with unread counts and timestamps
+- **Username Resolution**: Contact discovery using display names, usernames, pubkeys, or npubs
+- **Real-time DM System**: Live private message updates with optimistic sending
+- **Contact Management**: Add contacts via public key or npub with validation
+- **Message History**: Persistent conversation history with proper encryption/decryption
+- **Auto-navigation**: Direct navigation to conversations from `/msg` commands
+
+### 🎨 User Experience & Interface Design
+- **Cross-Platform Ready**: React Native app for iOS, Android, and Web deployment
+- **Modern Dark Theme**: Elegant dark mode with purple accent colors and high contrast
+- **Responsive Navigation**: Tab-based navigation with stack-based modal presentations
+- **Pull-to-Refresh**: Gesture-based content refreshing across all screens
+- **Real-time Search**: Network-wide channel search with live filtering and results
+- **Connection Indicators**: Visual relay connectivity status with connection counts
+- **Loading States**: Smooth loading animations and skeleton states
+- **Optimistic Updates**: Immediate UI feedback for better perceived performance
+
+### 🔗 Network & Protocol Implementation
+- **Multi-Relay Architecture**: Connect to 17+ default Nostr relays simultaneously
+- **Automatic Failover**: Graceful handling of relay disconnections and reconnections
+- **Event Subscriptions**: Real-time event streaming with sophisticated filter support
+- **NIP-19 Support**: Full npub/nsec encoding/decoding with format validation
+- **Profile Synchronization**: Automatic profile data fetching and intelligent caching
+- **Network-wide Search**: Deep search across the entire decentralized Nostr network
+- **Event Validation**: Cryptographic event verification and signature validation
+
+### ⚙️ Technical Architecture & Capabilities
+
+#### 🔑 Security & Cryptography
+- **Nostr Key Management**: Secure private/public key generation, import, and storage
+- **NIP-04 Encryption**: End-to-end encryption for private messages
+- **Event Signing**: Cryptographic signing of all events with secp256k1
+- **Key Format Support**: Hex and nsec1/npub1 key format compatibility
+
+#### 💾 Data Management & Performance
+- **AsyncStorage Integration**: Local data persistence and caching system
+- **Profile Caching**: Intelligent user profile caching for performance
+- **Message Threading**: Sophisticated message threading and reply organization
+- **Event Filtering**: Advanced message filtering and subscription management
+- **Optimistic Updates**: Client-side optimistic updates for better UX
+
+#### 🌍 Platform & Deployment
+- **React Native Framework**: Cross-platform mobile and web compatibility
+- **Expo Integration**: Modern React Native development with Expo tools
+- **WebSocket Management**: Efficient connection pooling and message handling
+- **Web Compatibility**: Full web browser support with responsive design
+- **Bundle Optimization**: Optimized builds for web and mobile platforms
+
+### 📱 Screen Architecture & Components
+
+#### 🖥️ Main Application Screens
+- **HomeScreen**: Channel discovery with network search and real-time results
+- **ChannelScreen**: Full IRC chat interface with user lists and real-time messaging
+- **CreateChannelScreen**: Channel creation with validation and metadata input
+- **FeedScreen**: Social media feed with threaded posts and interactions
+- **PrivateMessageScreen**: Encrypted conversation list with contact management
+- **PrivateConversationScreen**: Individual encrypted chat interface
+- **ProfileScreen**: Complete profile management with following/followers
+- **UserProfileScreen**: View other users' profiles with follow/unfollow actions
+- **SettingsScreen**: Application settings and key management
+
+#### 🔧 Reusable UI Components
+- **ChannelList**: Reusable channel listing with member counts and descriptions
+- **MessageInput**: Universal message input with command parsing and validation
+- **MessageItem**: Message display with user names, timestamps, and interaction buttons
+- **UserList**: User listing with operator badges and online status indicators
 
 ## Technology Stack
 
