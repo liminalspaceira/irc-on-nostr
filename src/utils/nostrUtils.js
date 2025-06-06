@@ -1,4 +1,4 @@
-import { generateSecretKey, getPublicKey, finalizeEvent, verifyEvent as verifyNostrEvent } from 'nostr-tools';
+import { generateSecretKey, getPublicKey, finalizeEvent, verifyEvent as verifyNostrEvent, nip19 } from 'nostr-tools';
 import { EVENT_KINDS, DEFAULT_RELAYS } from './constants';
 
 export class NostrUtils {
@@ -442,6 +442,72 @@ export class NostrUtils {
       
       return ascending ? timestampA - timestampB : timestampB - timestampA;
     });
+  }
+
+  // NIP-19 encoding/decoding functions
+  npubToPubkey(npub) {
+    try {
+      const decoded = nip19.decode(npub);
+      if (decoded.type === 'npub') {
+        return decoded.data;
+      }
+      throw new Error('Invalid npub format');
+    } catch (error) {
+      throw new Error('Failed to decode npub: ' + error.message);
+    }
+  }
+
+  pubkeyToNpub(pubkey) {
+    try {
+      return nip19.npubEncode(pubkey);
+    } catch (error) {
+      throw new Error('Failed to encode pubkey to npub: ' + error.message);
+    }
+  }
+
+  nsecToPrivkey(nsec) {
+    try {
+      const decoded = nip19.decode(nsec);
+      if (decoded.type === 'nsec') {
+        return decoded.data;
+      }
+      throw new Error('Invalid nsec format');
+    } catch (error) {
+      throw new Error('Failed to decode nsec: ' + error.message);
+    }
+  }
+
+  privkeyToNsec(privkey) {
+    try {
+      // Convert hex string to Uint8Array if needed
+      let keyBytes;
+      if (typeof privkey === 'string') {
+        keyBytes = new Uint8Array(privkey.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+      } else {
+        keyBytes = privkey;
+      }
+      return nip19.nsecEncode(keyBytes);
+    } catch (error) {
+      throw new Error('Failed to encode private key to nsec: ' + error.message);
+    }
+  }
+
+  isValidNpub(npub) {
+    try {
+      const decoded = nip19.decode(npub);
+      return decoded.type === 'npub';
+    } catch (error) {
+      return false;
+    }
+  }
+
+  isValidNsec(nsec) {
+    try {
+      const decoded = nip19.decode(nsec);
+      return decoded.type === 'nsec';
+    } catch (error) {
+      return false;
+    }
   }
 }
 

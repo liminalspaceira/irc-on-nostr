@@ -1,4 +1,4 @@
-import { SimplePool, getPublicKey, finalizeEvent, generateSecretKey } from 'nostr-tools';
+import { SimplePool, getPublicKey, finalizeEvent, generateSecretKey, nip04 } from 'nostr-tools';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nostrUtils } from '../utils/nostrUtils';
 import { 
@@ -225,9 +225,16 @@ class NostrService {
     }
   }
 
-  async sendChannelMessage(channelId, message, replyTo = null) {
+  async sendChannelMessage(channelId, message, replyTo = null, messageType = null) {
     try {
       const event = nostrUtils.createChannelMessageEvent(channelId, message, replyTo);
+      
+      // Add message type tag if specified (for bot responses, etc.)
+      if (messageType) {
+        event.tags = event.tags || [];
+        event.tags.push(['message_type', messageType]);
+      }
+      
       return await this.publishEvent(event);
     } catch (error) {
       console.error('Error sending channel message:', error);
@@ -363,7 +370,7 @@ class NostrService {
     });
   }
 
-  async queryChannels(limit = 50) {
+  async queryChannels(limit = 200) {
     try {
       console.log('Querying channels from relays...');
       console.log('Connected relays:', Array.from(this.connectedRelays));
@@ -375,8 +382,8 @@ class NostrService {
         
         const filters = {
           kinds: [EVENT_KINDS.CHANNEL_CREATION],
-          limit: limit,
-          since: Math.floor(Date.now() / 1000) - (7 * 24 * 60 * 60) // Last 7 days
+          limit: limit
+          // Removed 'since' filter to get all channels, not just last 7 days
         };
         
         console.log('Query filters:', filters);
@@ -414,7 +421,7 @@ class NostrService {
           }
         );
         
-        // Timeout after 8 seconds (increased for better relay response)
+        // Timeout after 12 seconds (increased for better relay response)
         timeoutId = setTimeout(() => {
           console.log('⏰ Channel query timeout, returning', channels.length, 'channels');
           subscription.close();
@@ -422,7 +429,7 @@ class NostrService {
           // Sort by creation time (newest first)
           const sortedChannels = channels.sort((a, b) => b.createdAt - a.createdAt);
           resolve(sortedChannels);
-        }, 8000);
+        }, 12000);
       });
     } catch (error) {
       console.error('Error querying channels:', error);
@@ -432,9 +439,96 @@ class NostrService {
 
   async queryChannelMessages(channelId, limit = 100, since = null) {
     try {
-      // For now, return empty array
-      console.log(`Querying messages for channel ${channelId} - returning empty for now`);
-      return [];
+      const queryId = Math.random().toString(36).substring(2, 8);
+      console.log(`🔄 FRESH QUERY [${queryId}] for channel ${channelId}...`);
+      console.log('Channel ID length:', channelId.length);
+      console.log('Channel ID sample:', channelId.substring(0, 20) + '...');
+      
+      return new Promise((resolve) => {
+        const messages = [];
+        let timeoutId;
+        let subscription;
+        
+        // Try both: with and without channel filtering to compare
+        const filters = [
+          // Filter 1: Official channel messages for this specific channel
+          {
+            kinds: [EVENT_KINDS.CHANNEL_MESSAGE],
+            '#e': [channelId],
+            limit: 50
+          },
+          // Filter 2: Text notes that reference this channel
+          {
+            kinds: [EVENT_KINDS.TEXT_NOTE],
+            '#e': [channelId], 
+            limit: 50
+          }
+        ];
+        
+        console.log('Message query filters:', filters);
+        
+        subscription = this.pool.subscribeMany(
+          Array.from(this.connectedRelays),
+          filters,
+          {
+            onevent: (event) => {
+              console.log(`🔍 [${queryId}] CHANNEL-SPECIFIC EVENT found:`);
+              console.log('🔍 Kind:', event.kind);
+              console.log('🔍 Content:', event.content);
+              console.log('🔍 Tags:', JSON.stringify(event.tags, null, 2));
+              console.log('🔍 Target channel:', channelId);
+              
+              // Verify this event actually references our channel
+              const referencesChannel = event.tags.some(tag => 
+                tag[0] === 'e' && tag[1] === channelId
+              );
+              
+              if (referencesChannel) {
+                const message = {
+                  id: event.id,
+                  content: event.content,
+                  author: event.pubkey,
+                  channelId: channelId,
+                  timestamp: event.created_at,
+                  kind: event.kind,
+                  tags: event.tags
+                };
+                
+                messages.push(message);
+                console.log(`✅ [${queryId}] Added VALID channel message - Total:`, messages.length);
+              } else {
+                console.log(`❌ [${queryId}] Event does not reference target channel`);
+              }
+            },
+            oneose: () => {
+              console.log('📬 End of stored events for channel', channelId);
+              clearTimeout(timeoutId);
+              if (subscription) {
+                subscription.close();
+                subscription = null;
+              }
+              
+              // Sort by timestamp (oldest first)
+              const sortedMessages = messages.sort((a, b) => a.timestamp - b.timestamp);
+              console.log('🎯 Returning', sortedMessages.length, 'messages for channel', channelId);
+              resolve(sortedMessages);
+            }
+          }
+        );
+        
+        // Timeout after 5 seconds
+        timeoutId = setTimeout(() => {
+          console.log('⏰ Query timeout for channel', channelId, '- returning', messages.length, 'messages');
+          if (subscription) {
+            subscription.close();
+            subscription = null;
+          }
+          
+          // Sort by timestamp (oldest first)
+          const sortedMessages = messages.sort((a, b) => a.timestamp - b.timestamp);
+          resolve(sortedMessages);
+        }, 5000);
+      });
     } catch (error) {
       console.error('Error querying channel messages:', error);
       return [];
@@ -494,6 +588,254 @@ class NostrService {
     } catch (error) {
       console.error('Error removing relay:', error);
       throw error;
+    }
+  }
+
+  // Private messaging methods (NIP-04)
+  async sendPrivateMessage(recipientPubkey, content) {
+    if (!this.privateKey) {
+      throw new Error('No private key available for encryption');
+    }
+
+    try {
+      // Encrypt the message using NIP-04
+      const encryptedContent = await nip04.encrypt(this.privateKey, recipientPubkey, content);
+      
+      // Create the encrypted direct message event
+      const event = {
+        kind: 4, // NIP-04 encrypted direct message
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [['p', recipientPubkey]],
+        content: encryptedContent,
+      };
+
+      const signedEvent = finalizeEvent(event, this.privateKey);
+      
+      // Publish to relays
+      await this.pool.publish(Array.from(this.connectedRelays), signedEvent);
+      
+      console.log('Private message sent to:', recipientPubkey.substring(0, 8) + '...');
+      return signedEvent;
+    } catch (error) {
+      console.error('Error sending private message:', error);
+      throw error;
+    }
+  }
+
+  async getPrivateConversations() {
+    if (!this.publicKey) {
+      throw new Error('No public key available');
+    }
+
+    try {
+      // Query for both sent and received DMs
+      const sentEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [4],
+        authors: [this.publicKey],
+        limit: 1000
+      });
+
+      const receivedEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [4],
+        '#p': [this.publicKey],
+        limit: 1000
+      });
+
+      // Combine and process messages
+      const allEvents = [...sentEvents, ...receivedEvents];
+      const conversations = new Map();
+
+      for (const event of allEvents) {
+        try {
+          let otherPubkey;
+          let isFromMe = event.pubkey === this.publicKey;
+          
+          if (isFromMe) {
+            // Message sent by me, find recipient
+            const pTag = event.tags.find(tag => tag[0] === 'p');
+            if (!pTag) continue;
+            otherPubkey = pTag[1];
+          } else {
+            // Message received by me
+            otherPubkey = event.pubkey;
+          }
+
+          // Decrypt message
+          const decryptedContent = await nip04.decrypt(this.privateKey, otherPubkey, event.content);
+          
+          const message = {
+            id: event.id,
+            content: decryptedContent,
+            author: event.pubkey,
+            recipient: isFromMe ? otherPubkey : this.publicKey,
+            timestamp: event.created_at,
+            isFromMe: isFromMe
+          };
+
+          if (!conversations.has(otherPubkey)) {
+            conversations.set(otherPubkey, {
+              pubkey: otherPubkey,
+              messages: [],
+              lastMessage: null,
+              unreadCount: 0
+            });
+          }
+
+          const conversation = conversations.get(otherPubkey);
+          conversation.messages.push(message);
+          
+          // Update last message if this is newer
+          if (!conversation.lastMessage || message.timestamp > conversation.lastMessage.timestamp) {
+            conversation.lastMessage = message;
+          }
+        } catch (decryptError) {
+          console.warn('Failed to decrypt message:', decryptError);
+          // Skip messages that can't be decrypted
+        }
+      }
+
+      // Sort messages in each conversation and calculate unread count
+      const conversationsList = Array.from(conversations.values()).map(conv => {
+        conv.messages.sort((a, b) => a.timestamp - b.timestamp);
+        
+        // For now, mark all messages from others as unread (in a real app, you'd track read status)
+        conv.unreadCount = conv.messages.filter(msg => !msg.isFromMe).length;
+        
+        return conv;
+      });
+
+      // Sort conversations by last message timestamp
+      conversationsList.sort((a, b) => {
+        const aTime = a.lastMessage ? a.lastMessage.timestamp : 0;
+        const bTime = b.lastMessage ? b.lastMessage.timestamp : 0;
+        return bTime - aTime;
+      });
+
+      return conversationsList;
+    } catch (error) {
+      console.error('Error getting private conversations:', error);
+      throw error;
+    }
+  }
+
+  async getPrivateMessages(contactPubkey, limit = 100) {
+    if (!this.publicKey || !this.privateKey) {
+      throw new Error('No keys available');
+    }
+
+    try {
+      // Query for messages between me and the contact
+      const sentEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [4],
+        authors: [this.publicKey],
+        '#p': [contactPubkey],
+        limit: limit
+      });
+
+      const receivedEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [4],
+        authors: [contactPubkey],
+        '#p': [this.publicKey],
+        limit: limit
+      });
+
+      const allEvents = [...sentEvents, ...receivedEvents];
+      const messages = [];
+
+      for (const event of allEvents) {
+        try {
+          const decryptedContent = await nip04.decrypt(this.privateKey, contactPubkey, event.content);
+          
+          messages.push({
+            id: event.id,
+            content: decryptedContent,
+            author: event.pubkey,
+            timestamp: event.created_at,
+            isFromMe: event.pubkey === this.publicKey
+          });
+        } catch (decryptError) {
+          console.warn('Failed to decrypt message:', decryptError);
+        }
+      }
+
+      // Sort by timestamp
+      messages.sort((a, b) => a.timestamp - b.timestamp);
+      
+      return messages;
+    } catch (error) {
+      console.error('Error getting private messages:', error);
+      throw error;
+    }
+  }
+
+  subscribeToPrivateMessages(contactPubkey, onNewMessage) {
+    if (!this.publicKey) {
+      throw new Error('No public key available');
+    }
+
+    const subscriptionId = `dm_${contactPubkey}`;
+    
+    // Subscribe to new messages from contact
+    const sub = this.pool.subscribeMany(Array.from(this.connectedRelays), [
+      {
+        kinds: [4],
+        authors: [contactPubkey],
+        '#p': [this.publicKey],
+        since: Math.floor(Date.now() / 1000)
+      }
+    ], {
+      onevent: async (event) => {
+        try {
+          const decryptedContent = await nip04.decrypt(this.privateKey, contactPubkey, event.content);
+          
+          const message = {
+            id: event.id,
+            content: decryptedContent,
+            author: event.pubkey,
+            timestamp: event.created_at,
+            isFromMe: false
+          };
+
+          onNewMessage(message);
+        } catch (error) {
+          console.error('Error decrypting new private message:', error);
+        }
+      },
+      oneose: () => {
+        console.log('Private message subscription established for:', contactPubkey.substring(0, 8) + '...');
+      }
+    });
+
+    this.subscriptions.set(subscriptionId, sub);
+    return subscriptionId;
+  }
+
+  async getUserProfile(pubkey) {
+    try {
+      // Query for user profile metadata (kind 0)
+      const profileEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [0],
+        authors: [pubkey],
+        limit: 1
+      });
+
+      if (profileEvents.length > 0) {
+        // Get the most recent profile event
+        const latestProfile = profileEvents.sort((a, b) => b.created_at - a.created_at)[0];
+        
+        try {
+          const profileData = JSON.parse(latestProfile.content);
+          return profileData;
+        } catch (parseError) {
+          console.warn('Failed to parse profile data for:', pubkey);
+          return null;
+        }
+      }
+
+      return null;
+    } catch (error) {
+      console.error('Error getting user profile:', error);
+      return null;
     }
   }
 

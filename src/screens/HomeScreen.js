@@ -45,7 +45,7 @@ const HomeScreen = ({ navigation, theme = THEMES.DARK }) => {
 
   const loadChannels = async () => {
     try {
-      const channelList = await nostrService.queryChannels(50);
+      const channelList = await nostrService.queryChannels(200);
       setChannels(channelList);
     } catch (error) {
       console.error('Failed to load channels:', error);

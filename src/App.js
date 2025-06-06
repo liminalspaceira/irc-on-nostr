@@ -13,9 +13,12 @@ import ChannelScreen from './screens/ChannelScreen';
 import CreateChannelScreen from './screens/CreateChannelScreen';
 import SettingsScreen from './screens/SettingsScreen';
 import ProfileScreen from './screens/ProfileScreen';
+import PrivateMessageScreen from './screens/PrivateMessageScreen';
+import PrivateConversationScreen from './screens/PrivateConversationScreen';
 
 // Services
 import { nostrService } from './services/NostrService';
+import { botService } from './services/BotService';
 import { nostrUtils } from './utils/nostrUtils';
 import { STORAGE_KEYS, THEMES } from './utils/constants';
 
@@ -23,6 +26,12 @@ import { STORAGE_KEYS, THEMES } from './utils/constants';
 if (Platform.OS === 'web') {
   require('react-native-url-polyfill/auto');
   require('react-native-get-random-values');
+  
+  // Suppress useNativeDriver warning on web
+  console.warn = (...args) => {
+    if (args[0]?.includes?.('useNativeDriver')) return;
+    console.log(...args);
+  };
 }
 
 const Tab = createBottomTabNavigator();
@@ -82,7 +91,7 @@ function MainTabs() {
       />
       <Tab.Screen 
         name="Messages" 
-        children={() => <PlaceholderScreen title="Private Messages" />}
+        component={PrivateMessageScreen}
         options={{ title: 'Private Messages' }}
       />
       <Tab.Screen 
@@ -131,6 +140,14 @@ function AppNavigator() {
           presentation: 'modal'
         }}
       />
+      <Stack.Screen 
+        name="PrivateConversation" 
+        component={PrivateConversationScreen}
+        options={({ route }) => ({ 
+          title: route.params?.contactName || 'Private Chat',
+          presentation: 'card'
+        })}
+      />
     </Stack.Navigator>
   );
 }
@@ -157,6 +174,15 @@ export default function App() {
       } else {
         setHasKeys(false);
         console.log('🔑 No keys found - user can import or generate them');
+      }
+      
+      // Initialize bot service
+      try {
+        await botService.initialize();
+        console.log('✅ Bot service initialized');
+      } catch (error) {
+        console.error('⚠️ Bot service initialization failed:', error);
+        // Continue without bots
       }
       
       console.log('✅ App initialization complete');
