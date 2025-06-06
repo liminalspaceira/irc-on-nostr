@@ -27,9 +27,13 @@ const ProfileScreen = ({ theme = THEMES.DARK }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [editedProfile, setEditedProfile] = useState({});
+  const [following, setFollowing] = useState([]);
+  const [followingProfiles, setFollowingProfiles] = useState(new Map());
+  const [isLoadingFollowing, setIsLoadingFollowing] = useState(false);
 
   useEffect(() => {
     loadProfile();
+    loadFollowing();
   }, []);
 
   const loadProfile = async () => {
@@ -61,6 +65,31 @@ const ProfileScreen = ({ theme = THEMES.DARK }) => {
       }
     } catch (error) {
       console.error('Error loading profile:', error);
+    }
+  };
+
+  const loadFollowing = async () => {
+    try {
+      const storedPublicKey = await AsyncStorage.getItem(STORAGE_KEYS.PUBLIC_KEY);
+      if (!storedPublicKey) return;
+
+      setIsLoadingFollowing(true);
+      
+      // Get the user's contact list
+      const contacts = await nostrService.getUserContacts(storedPublicKey);
+      setFollowing(contacts);
+
+      if (contacts.length > 0) {
+        // Get profiles for all contacts
+        const profiles = await nostrService.getMultipleUserProfiles(contacts);
+        setFollowingProfiles(profiles);
+        
+        console.log(`Loaded ${contacts.length} contacts, got ${profiles.size} profiles`);
+      }
+    } catch (error) {
+      console.error('Error loading following:', error);
+    } finally {
+      setIsLoadingFollowing(false);
     }
   };
 
@@ -221,6 +250,60 @@ const ProfileScreen = ({ theme = THEMES.DARK }) => {
         )}
       </View>
 
+      <View style={[styles.content, { backgroundColor: theme.cardBackgroundColor }]}>
+        <View style={styles.followingSectionHeader}>
+          <Text style={[styles.sectionTitle, { color: theme.textColor }]}>
+            Following ({following.length})
+          </Text>
+          {isLoadingFollowing && (
+            <Text style={[styles.loadingText, { color: theme.secondaryTextColor }]}>
+              Loading...
+            </Text>
+          )}
+        </View>
+        
+        {following.length > 0 ? (
+          <View style={styles.followingGrid}>
+            {following.map((pubkey) => {
+              const profile = followingProfiles.get(pubkey);
+              return (
+                <View key={pubkey} style={[styles.followingItem, { backgroundColor: theme.surfaceColor }]}>
+                  <View style={styles.followingAvatar}>
+                    {profile?.picture ? (
+                      <Image source={{ uri: profile.picture }} style={styles.followingAvatarImage} />
+                    ) : (
+                      <View style={[styles.followingAvatarPlaceholder, { backgroundColor: theme.primaryColor }]}>
+                        <Ionicons name="person" size={20} color="white" />
+                      </View>
+                    )}
+                  </View>
+                  <View style={styles.followingInfo}>
+                    <Text style={[styles.followingName, { color: theme.textColor }]} numberOfLines={1}>
+                      {profile?.name || profile?.display_name || 'Unnamed'}
+                    </Text>
+                    <Text style={[styles.followingPubkey, { color: theme.secondaryTextColor }]} numberOfLines={1}>
+                      {pubkey.substring(0, 8)}...
+                    </Text>
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        ) : (
+          !isLoadingFollowing && (
+            <View style={styles.emptyState}>
+              <Ionicons name="people-outline" size={48} color={theme.secondaryTextColor} />
+              <Text style={[styles.emptyStateText, { color: theme.secondaryTextColor }]}>
+                You're not following anyone yet
+              </Text>
+              <Text style={[styles.emptyStateSubtext, { color: theme.secondaryTextColor }]}>
+                Start following people to see them here
+              </Text>
+            </View>
+          )
+        )}
+      </View>
+
       <View style={[styles.infoCard, { backgroundColor: theme.cardBackgroundColor }]}>
         <Ionicons name="information-circle" size={24} color={theme.primaryColor} />
         <View style={styles.infoContent}>
@@ -350,6 +433,71 @@ const styles = StyleSheet.create({
   infoText: {
     fontSize: 14,
     lineHeight: 20,
+  },
+  followingSectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  loadingText: {
+    fontSize: 14,
+    fontStyle: 'italic',
+  },
+  followingGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  followingItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    borderRadius: 8,
+    minWidth: '48%',
+    flexBasis: '48%',
+    maxWidth: '48%',
+  },
+  followingAvatar: {
+    marginRight: 12,
+  },
+  followingAvatarImage: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+  },
+  followingAvatarPlaceholder: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  followingInfo: {
+    flex: 1,
+  },
+  followingName: {
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  followingPubkey: {
+    fontSize: 12,
+    fontFamily: 'monospace',
+  },
+  emptyState: {
+    alignItems: 'center',
+    paddingVertical: 40,
+  },
+  emptyStateText: {
+    fontSize: 16,
+    fontWeight: '600',
+    marginTop: 16,
+    marginBottom: 8,
+  },
+  emptyStateSubtext: {
+    fontSize: 14,
+    textAlign: 'center',
   },
 });
 

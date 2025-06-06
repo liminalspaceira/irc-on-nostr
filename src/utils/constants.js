@@ -109,17 +109,38 @@ export const USER_MODES = {
 export const THEMES = {
   DARK: {
     name: 'dark',
-    backgroundColor: '#1a1a2e',
-    cardBackgroundColor: '#16213e',
-    surfaceColor: '#0f172a',
-    primaryColor: '#0066cc',
-    secondaryColor: '#3b82f6',
-    textColor: '#ffffff',
-    secondaryTextColor: '#94a3b8',
-    borderColor: '#334155',
-    errorColor: '#ef4444',
-    successColor: '#10b981',
-    warningColor: '#f59e0b'
+    // Main backgrounds - deep charcoal gradient
+    backgroundColor: '#0f0f0f',           // Deepest black-grey
+    cardBackgroundColor: '#1a1a1a',      // Card/post background
+    surfaceColor: '#141414',             // Input fields, buttons
+    
+    // Primary colors - elegant purple-grey accent
+    primaryColor: '#8b5cf6',             // Primary purple (violet-500)
+    secondaryColor: '#a78bfa',           // Lighter purple (violet-400)
+    accentColor: '#c4b5fd',              // Lightest purple (violet-300)
+    
+    // Text colors - high contrast greys
+    textColor: '#f8fafc',                // Pure white for main text
+    secondaryTextColor: '#94a3b8',       // Medium grey for secondary text
+    mutedTextColor: '#64748b',           // Muted grey for timestamps
+    
+    // Border and dividers - subtle greys
+    borderColor: '#374151',              // Subtle border grey
+    dividerColor: '#1f2937',             // Darker divider
+    
+    // Status colors - modern and vibrant
+    errorColor: '#f87171',               // Soft red (red-400)
+    successColor: '#34d399',             // Emerald green (emerald-400) 
+    warningColor: '#fbbf24',             // Amber (amber-400)
+    
+    // Interactive states
+    hoverColor: '#1f2937',               // Hover background
+    pressedColor: '#111827',             // Pressed state
+    
+    // Special accent colors for features
+    likeColor: '#ec4899',                // Pink for likes (pink-500)
+    repostColor: '#06b6d4',              // Cyan for reposts (cyan-500)
+    replyColor: '#10b981',               // Emerald for replies (emerald-500)
   },
   LIGHT: {
     name: 'light',
@@ -209,10 +230,6 @@ export const DEFAULT_SETTINGS = {
   theme: 'dark',
   notifications: true,
   soundEnabled: true,
-  showJoinLeaveMessages: true,
-  showTimestamps: true,
-  compactMode: false,
-  autoScrollToBottom: true,
   relays: DEFAULT_RELAYS
 };
 

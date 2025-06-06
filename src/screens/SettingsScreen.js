@@ -24,14 +24,11 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
   const [relays, setRelays] = useState(DEFAULT_RELAYS);
   const [settings, setSettings] = useState({
     notifications: true,
-    soundEnabled: true,
-    showJoinLeaveMessages: true,
-    showTimestamps: true,
-    compactMode: false,
-    autoScrollToBottom: true
+    soundEnabled: true
   });
   const [showPrivateKey, setShowPrivateKey] = useState(false);
   const [importModalVisible, setImportModalVisible] = useState(false);
+  const [generateModalVisible, setGenerateModalVisible] = useState(false);
   const [newPrivateKey, setNewPrivateKey] = useState('');
   const [connectionStatus, setConnectionStatus] = useState({ isConnected: false });
 
@@ -82,36 +79,73 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
     }
   };
 
-  const generateNewKeys = async () => {
-    Alert.alert(
-      'Generate New Keys',
-      'This will replace your current Nostr identity. Are you sure?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Generate',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              const keyPair = nostrUtils.generateKeyPair();
-              await AsyncStorage.setItem(STORAGE_KEYS.PRIVATE_KEY, keyPair.privateKey);
-              await AsyncStorage.setItem(STORAGE_KEYS.PUBLIC_KEY, keyPair.publicKey);
-              setPrivateKey(keyPair.privateKey);
-              setPublicKey(keyPair.publicKey);
-              
-              // Update NostrService with new keys
-              nostrService.privateKey = keyPair.privateKey;
-              nostrService.publicKey = keyPair.publicKey;
-              
-              Alert.alert('Success', 'New Nostr keys generated!');
-            } catch (error) {
-              console.error('Error generating keys:', error);
-              Alert.alert('Error', 'Failed to generate new keys');
-            }
-          }
+  const generateNewKeys = () => {
+    console.log('🔄 Generate New Keys button pressed!');
+    setGenerateModalVisible(true);
+  };
+
+  const confirmGenerateNewKeys = async () => {
+    try {
+      console.log('🔑 Generating new Nostr identity...');
+      setGenerateModalVisible(false);
+      
+      // Generate new key pair
+      const keyPair = nostrUtils.generateKeyPair();
+      console.log('✅ New keys generated');
+      console.log('📝 Public key:', keyPair.publicKey);
+      console.log('🔐 Private key length:', keyPair.privateKey.length);
+      
+      // Clear all existing data
+      console.log('🧹 Clearing existing user data...');
+      await AsyncStorage.removeItem(STORAGE_KEYS.PROFILE);
+      await AsyncStorage.removeItem('user_liked_posts');
+      await AsyncStorage.removeItem('user_reposted_posts');
+      
+      // Save new keys
+      await AsyncStorage.setItem(STORAGE_KEYS.PRIVATE_KEY, keyPair.privateKey);
+      await AsyncStorage.setItem(STORAGE_KEYS.PUBLIC_KEY, keyPair.publicKey);
+      
+      // Update local state
+      setPrivateKey(keyPair.privateKey);
+      setPublicKey(keyPair.publicKey);
+      
+      // Reinitialize NostrService with new keys
+      console.log('🔄 Reinitializing NostrService...');
+      nostrService.privateKey = keyPair.privateKey;
+      nostrService.publicKey = keyPair.publicKey;
+      
+      // Reconnect to relays with new identity
+      try {
+        await nostrService.initialize();
+        console.log('✅ NostrService reinitialized successfully');
+      } catch (initError) {
+        console.error('⚠️ NostrService initialization warning:', initError);
+        // Continue anyway - this is not critical
+      }
+      
+      // Show success message using web-compatible method
+      setTimeout(() => {
+        if (typeof window !== 'undefined') {
+          alert(`New Nostr Identity Created!\n\nYour new Nostr identity has been created successfully!\n\nPublic Key: ${keyPair.publicKey.substring(0, 16)}...\n\nYou can now set up your profile and start fresh on the Nostr network.`);
+        } else {
+          Alert.alert(
+            'New Nostr Identity Created!', 
+            `Your new Nostr identity has been created successfully!\n\nPublic Key: ${keyPair.publicKey.substring(0, 16)}...\n\nYou can now set up your profile and start fresh on the Nostr network.`,
+            [{ text: 'OK' }]
+          );
         }
-      ]
-    );
+      }, 100);
+      
+    } catch (error) {
+      console.error('❌ Error generating new identity:', error);
+      setTimeout(() => {
+        if (typeof window !== 'undefined') {
+          alert(`Error: Failed to generate new identity: ${error.message}`);
+        } else {
+          Alert.alert('Error', `Failed to generate new identity: ${error.message}`);
+        }
+      }, 100);
+    }
   };
 
   const importPrivateKey = async () => {
@@ -310,37 +344,13 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
             'Notifications',
             settings.notifications,
             (value) => saveSettings({ ...settings, notifications: value }),
-            'Show desktop notifications for new messages'
+            'Show notifications for new messages'
           )}
           {renderSettingItem(
             'Sound Effects',
             settings.soundEnabled,
             (value) => saveSettings({ ...settings, soundEnabled: value }),
             'Play sounds for message notifications'
-          )}
-          {renderSettingItem(
-            'Show Join/Leave Messages',
-            settings.showJoinLeaveMessages,
-            (value) => saveSettings({ ...settings, showJoinLeaveMessages: value }),
-            'Display when users join or leave channels'
-          )}
-          {renderSettingItem(
-            'Show Timestamps',
-            settings.showTimestamps,
-            (value) => saveSettings({ ...settings, showTimestamps: value }),
-            'Display message timestamps'
-          )}
-          {renderSettingItem(
-            'Compact Mode',
-            settings.compactMode,
-            (value) => saveSettings({ ...settings, compactMode: value }),
-            'Use compact message layout'
-          )}
-          {renderSettingItem(
-            'Auto-scroll to Bottom',
-            settings.autoScrollToBottom,
-            (value) => saveSettings({ ...settings, autoScrollToBottom: value }),
-            'Automatically scroll to new messages'
           )}
         </View>
       ))}
@@ -412,6 +422,45 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
               >
                 <Text style={[styles.modalButtonText, { color: 'white' }]}>
                   Import
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Generate New Keys Confirmation Modal */}
+      <Modal
+        visible={generateModalVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setGenerateModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: theme.cardBackgroundColor }]}>
+            <Text style={[styles.modalTitle, { color: theme.textColor }]}>
+              Generate New Nostr Identity
+            </Text>
+            <Text style={[styles.modalDescription, { color: theme.secondaryTextColor }]}>
+              This will create a completely new Nostr user identity. Your current profile, follows, and all data will be lost. Are you sure?
+            </Text>
+            
+            <View style={styles.modalActions}>
+              <TouchableOpacity 
+                style={[styles.modalButton, { backgroundColor: theme.borderColor }]}
+                onPress={() => setGenerateModalVisible(false)}
+              >
+                <Text style={[styles.modalButtonText, { color: theme.textColor }]}>
+                  Cancel
+                </Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity 
+                style={[styles.modalButton, { backgroundColor: theme.warningColor }]}
+                onPress={confirmGenerateNewKeys}
+              >
+                <Text style={[styles.modalButtonText, { color: 'white' }]}>
+                  Generate New Identity
                 </Text>
               </TouchableOpacity>
             </View>

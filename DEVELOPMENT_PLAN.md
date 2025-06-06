@@ -78,7 +78,7 @@ Building a decentralized IRC-like chat application using the Nostr protocol. Thi
 #### IRC Commands
 - [x] Channel joining via UI navigation ✅
 - [x] `/part #channel` - Leave channels ✅
-- [ ] `/msg user message` - Private messages
+- [x] `/msg user message` - Private messages ✅
 - [ ] `/nick nickname` - Set display name
 - [x] `/topic text` - Set channel topic ✅
 - [x] `/users` - List channel users ✅
@@ -183,7 +183,68 @@ Building a decentralized IRC-like chat application using the Nostr protocol. Thi
 - ✅ Statistics and uptime tracking
 - ✅ Comprehensive error handling and user feedback
 
-### Phase 5: Advanced Features (Weeks 9-10)
+### Phase 5: Private Messaging System ✅ **COMPLETED**
+**Goal**: NIP-04 encrypted direct messages and user experience improvements
+
+#### Private Messaging Implementation
+- [x] **NIP-04 Encrypted Direct Messages** ✅
+- [x] **PrivateMessageScreen** - Conversations list interface ✅
+- [x] **PrivateConversationScreen** - Individual chat interface ✅
+- [x] **NostrService DM Support** - Encryption/decryption methods ✅
+- [x] **Real-time message subscriptions** ✅
+- [x] **Message history loading** ✅
+
+#### Private Message Features ✅
+- [x] **End-to-end encryption** using NIP-04 ✅
+- [x] **Conversation list** with last message and unread counts ✅
+- [x] **Real-time messaging** with optimistic sending ✅
+- [x] **Username resolution** for `/msg` command ✅
+- [x] **Self-messaging support** (notes to self) ✅
+- [x] **Auto-scroll and proper input behavior** ✅
+
+#### `/msg` Command Enhancement ✅
+- [x] **Username support** - `/msg hackira hello` ✅
+- [x] **Pubkey support** - `/msg abc123... hello` ✅
+- [x] **npub support** - `/msg npub1... hello` ✅
+- [x] **Auto-navigation** to conversation with initial message ✅
+- [x] **User lookup** across channel participants ✅
+
+#### User Display Name System ✅
+- [x] **Profile loading** from Nostr metadata (Kind 0) ✅
+- [x] **Display name resolution** - name/display_name/username priority ✅
+- [x] **Channel message names** - Show usernames instead of pubkeys ✅
+- [x] **Private message names** - Show usernames in conversation list ✅
+- [x] **User list names** - Show usernames in channel user lists ✅
+- [x] **Profile caching** for performance ✅
+
+#### UI/UX Improvements ✅
+- [x] **Consistent input behavior** - Enter key sends messages ✅
+- [x] **Web-compatible scrolling** - Fixed scrolling issues ✅
+- [x] **Auto-scroll to new messages** ✅
+- [x] **Contact management** - Add contacts via pubkey/npub ✅
+- [x] **Error handling** - Graceful fallbacks and user feedback ✅
+
+#### NIP-19 Support ✅
+- [x] **npub encoding/decoding** ✅
+- [x] **nsec encoding/decoding** ✅
+- [x] **Format validation** ✅
+- [x] **Conversion utilities** ✅
+
+#### Navigation Integration ✅
+- [x] **Private Messages tab** - Fully functional ✅
+- [x] **Screen transitions** - Smooth navigation ✅
+- [x] **Deep linking** - Direct access to conversations ✅
+- [x] **Back navigation** - Proper navigation stack ✅
+
+#### Deliverables ✅
+- ✅ **Complete private messaging system** with NIP-04 encryption
+- ✅ **Username-based messaging** - Natural user experience
+- ✅ **Real-time encrypted conversations** 
+- ✅ **User-friendly interface** matching channel behavior
+- ✅ **Profile system** showing real names instead of pubkeys
+- ✅ **Cross-platform compatibility** (web & mobile ready)
+
+### Phase 6: Advanced Features (Weeks 9-10)
 **Goal**: Polish and advanced IRC features
 
 #### Advanced IRC Features
@@ -243,11 +304,12 @@ Building a decentralized IRC-like chat application using the Nostr protocol. Thi
 ### Nostr Event Types Used
 
 #### Standard NIPs
-- **NIP-01**: Basic protocol, event structure
-- **NIP-04**: Encrypted direct messages
+- **NIP-01**: Basic protocol, event structure ✅
+- **NIP-04**: Encrypted direct messages ✅
 - **NIP-05**: DNS-based identity verification
 - **NIP-10**: Text note references (replies)
-- **NIP-28**: Public chat channels
+- **NIP-19**: bech32-encoded entities (npub/nsec) ✅
+- **NIP-28**: Public chat channels ✅
 - **NIP-42**: Authentication of clients to relays
 
 #### Custom Event Kinds (Proposed)
@@ -369,6 +431,7 @@ irc-on-nostr/
 │   │   ├── HomeScreen.js
 │   │   ├── ChannelScreen.js
 │   │   ├── PrivateMessageScreen.js
+│   │   ├── PrivateConversationScreen.js
 │   │   ├── SettingsScreen.js
 │   │   ├── ProfileScreen.js
 │   │   └── CreateChannelScreen.js

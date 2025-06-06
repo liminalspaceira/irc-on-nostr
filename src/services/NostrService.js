@@ -839,6 +839,421 @@ class NostrService {
     }
   }
 
+  async getUserContacts(pubkey) {
+    try {
+      // Query for contact list (kind 3)
+      const contactEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [3],
+        authors: [pubkey],
+        limit: 1
+      });
+
+      if (contactEvents.length > 0) {
+        // Get the most recent contact list event
+        const latestContacts = contactEvents.sort((a, b) => b.created_at - a.created_at)[0];
+        
+        // Extract pubkeys from p tags
+        const following = latestContacts.tags
+          .filter(tag => tag[0] === 'p' && tag[1])
+          .map(tag => tag[1]);
+        
+        console.log(`Found ${following.length} contacts for user ${pubkey.substring(0, 8)}...`);
+        return following;
+      }
+
+      return [];
+    } catch (error) {
+      console.error('Error getting user contacts:', error);
+      return [];
+    }
+  }
+
+  async getMultipleUserProfiles(pubkeys) {
+    try {
+      if (!pubkeys || pubkeys.length === 0) {
+        return new Map();
+      }
+
+      console.log(`Querying profiles for ${pubkeys.length} users...`);
+      
+      // Query for multiple user profiles at once
+      const profileEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [0],
+        authors: pubkeys,
+        limit: pubkeys.length * 2
+      });
+
+      const profiles = new Map();
+
+      // Process each profile event
+      for (const event of profileEvents) {
+        try {
+          const profileData = JSON.parse(event.content);
+          
+          // Keep only the most recent profile for each pubkey
+          if (!profiles.has(event.pubkey) || 
+              profiles.get(event.pubkey).timestamp < event.created_at) {
+            profiles.set(event.pubkey, {
+              ...profileData,
+              pubkey: event.pubkey,
+              timestamp: event.created_at
+            });
+          }
+        } catch (parseError) {
+          console.warn('Failed to parse profile data for:', event.pubkey);
+        }
+      }
+
+      console.log(`Retrieved ${profiles.size} profiles out of ${pubkeys.length} requested`);
+      return profiles;
+    } catch (error) {
+      console.error('Error getting multiple user profiles:', error);
+      return new Map();
+    }
+  }
+
+  async getFeedPosts(followingPubkeys, limit = 100) {
+    try {
+      if (!followingPubkeys || followingPubkeys.length === 0) {
+        return [];
+      }
+
+      console.log(`Querying feed posts from ${followingPubkeys.length} followed users...`);
+      
+      // Query for text notes (kind 1) from followed users
+      const feedEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [1], // Text notes
+        authors: followingPubkeys,
+        limit: limit,
+        since: Math.floor(Date.now() / 1000) - (7 * 24 * 60 * 60) // Last 7 days
+      });
+
+      // Also get potential replies to these posts
+      const postIds = feedEvents.map(event => event.id);
+      const replyEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [1],
+        '#e': postIds,
+        limit: limit * 2
+      });
+
+      // Combine and deduplicate events
+      const allEvents = [...feedEvents, ...replyEvents];
+      const uniqueEvents = new Map();
+      
+      allEvents.forEach(event => {
+        if (!uniqueEvents.has(event.id)) {
+          uniqueEvents.set(event.id, event);
+        }
+      });
+
+      const posts = Array.from(uniqueEvents.values()).map(event => ({
+        id: event.id,
+        content: event.content,
+        pubkey: event.pubkey,
+        created_at: event.created_at,
+        tags: event.tags || [],
+        sig: event.sig
+      }));
+
+      console.log(`Retrieved ${posts.length} posts for feed`);
+      return posts;
+    } catch (error) {
+      console.error('Error getting feed posts:', error);
+      return [];
+    }
+  }
+
+  async likePost(postId, authorPubkey) {
+    try {
+      console.log('🔍 NostrService.likePost called with:', { postId, authorPubkey });
+      console.log('🔍 Service state:', { 
+        hasPrivateKey: !!this.privateKey, 
+        isConnected: this.isConnected,
+        connectedRelays: this.connectedRelays.size 
+      });
+      
+      if (!this.privateKey) {
+        throw new Error('No private key available for liking posts');
+      }
+
+      if (!this.isConnected || this.connectedRelays.size === 0) {
+        throw new Error('Not connected to any Nostr relays');
+      }
+
+      console.log(`❤️ Creating like event for post ${postId}...`);
+      
+      // Create reaction event (kind 7)
+      const reactionEvent = {
+        kind: 7, // Reaction
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['e', postId], // Event being reacted to
+          ['p', authorPubkey], // Author of the event being reacted to
+        ],
+        content: '❤️', // Heart emoji for like
+      };
+
+      console.log('📝 Publishing reaction event:', reactionEvent);
+      const signedEvent = await this.publishEvent(reactionEvent);
+      console.log('✅ Like event published successfully:', signedEvent.id);
+      return signedEvent;
+    } catch (error) {
+      console.error('❌ Error in likePost:', error);
+      throw error;
+    }
+  }
+
+  async unlikePost(postId, authorPubkey) {
+    try {
+      console.log('🔍 NostrService.unlikePost called with:', { postId, authorPubkey });
+      
+      if (!this.privateKey) {
+        throw new Error('No private key available for unliking posts');
+      }
+
+      if (!this.isConnected || this.connectedRelays.size === 0) {
+        throw new Error('Not connected to any Nostr relays');
+      }
+
+      console.log(`💔 Creating delete event for liked post ${postId}...`);
+      
+      // First, find the user's like event for this post
+      const userLikes = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [7], // Reactions
+        authors: [this.publicKey],
+        '#e': [postId],
+        limit: 10
+      });
+
+      if (userLikes.length === 0) {
+        console.log('⚠️ No like event found to delete');
+        return null;
+      }
+
+      // Get the most recent like event
+      const likeToDelete = userLikes.sort((a, b) => b.created_at - a.created_at)[0];
+      console.log('🎯 Found like event to delete:', likeToDelete.id);
+
+      // Create deletion event (kind 5)
+      const deleteEvent = {
+        kind: 5, // Deletion
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['e', likeToDelete.id], // Event to delete (the like event)
+        ],
+        content: 'Unliked post',
+      };
+
+      console.log('📝 Publishing delete event:', deleteEvent);
+      const signedEvent = await this.publishEvent(deleteEvent);
+      console.log('✅ Unlike event published successfully:', signedEvent.id);
+      return signedEvent;
+    } catch (error) {
+      console.error('❌ Error in unlikePost:', error);
+      throw error;
+    }
+  }
+
+  async repostPost(postId, authorPubkey, content = '') {
+    try {
+      if (!this.privateKey) {
+        throw new Error('No private key available for reposting');
+      }
+
+      console.log(`Reposting post ${postId}...`);
+      
+      // Create repost event (kind 6)
+      const repostEvent = {
+        kind: 6, // Repost
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['e', postId], // Event being reposted
+          ['p', authorPubkey], // Author of the event being reposted
+        ],
+        content: content, // Optional comment on repost
+      };
+
+      const signedEvent = await this.publishEvent(repostEvent);
+      console.log('Repost event published:', signedEvent.id);
+      return signedEvent;
+    } catch (error) {
+      console.error('Error reposting post:', error);
+      throw error;
+    }
+  }
+
+  async replyToPost(postId, authorPubkey, content) {
+    try {
+      if (!this.privateKey) {
+        throw new Error('No private key available for replying');
+      }
+
+      if (!content || !content.trim()) {
+        throw new Error('Reply content cannot be empty');
+      }
+
+      console.log(`Replying to post ${postId}...`);
+      
+      // Create reply event (kind 1 with e tag)
+      const replyEvent = {
+        kind: 1, // Text note
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['e', postId], // Event being replied to
+          ['p', authorPubkey], // Author of the event being replied to
+        ],
+        content: content.trim(),
+      };
+
+      const signedEvent = await this.publishEvent(replyEvent);
+      console.log('Reply event published:', signedEvent.id);
+      return signedEvent;
+    } catch (error) {
+      console.error('Error replying to post:', error);
+      throw error;
+    }
+  }
+
+  async getPostInteractions(postIds) {
+    try {
+      if (!postIds || postIds.length === 0) {
+        return { likes: new Map(), reposts: new Map(), replies: new Map() };
+      }
+
+      console.log(`🔍 Querying interactions for ${postIds.length} posts...`);
+
+      // Query for reactions (kind 7) - likes
+      const reactionEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [7], // Reactions
+        '#e': postIds,
+        limit: 1000
+      });
+
+      // Query for reposts (kind 6)
+      const repostEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [6], // Reposts
+        '#e': postIds,
+        limit: 1000
+      });
+
+      // Query for replies (kind 1 with e tags)
+      const replyEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [1], // Text notes that are replies
+        '#e': postIds,
+        limit: 1000
+      });
+
+      // Process results
+      const likes = new Map();
+      const reposts = new Map();
+      const replies = new Map();
+
+      // Count reactions/likes
+      reactionEvents.forEach(event => {
+        const postId = event.tags.find(tag => tag[0] === 'e')?.[1];
+        if (postId) {
+          if (!likes.has(postId)) {
+            likes.set(postId, { count: 0, users: new Set(), userLiked: false });
+          }
+          const likeData = likes.get(postId);
+          likeData.count++;
+          likeData.users.add(event.pubkey);
+          if (event.pubkey === this.publicKey) {
+            likeData.userLiked = true;
+          }
+        }
+      });
+
+      // Count reposts
+      repostEvents.forEach(event => {
+        const postId = event.tags.find(tag => tag[0] === 'e')?.[1];
+        if (postId) {
+          if (!reposts.has(postId)) {
+            reposts.set(postId, { count: 0, users: new Set(), userReposted: false });
+          }
+          const repostData = reposts.get(postId);
+          repostData.count++;
+          repostData.users.add(event.pubkey);
+          if (event.pubkey === this.publicKey) {
+            repostData.userReposted = true;
+          }
+        }
+      });
+
+      // Count replies
+      replyEvents.forEach(event => {
+        const postId = event.tags.find(tag => tag[0] === 'e')?.[1];
+        if (postId && event.pubkey !== this.publicKey) { // Don't count our own posts
+          if (!replies.has(postId)) {
+            replies.set(postId, { count: 0, users: new Set() });
+          }
+          const replyData = replies.get(postId);
+          replyData.count++;
+          replyData.users.add(event.pubkey);
+        }
+      });
+
+      console.log(`📊 Found interactions - Likes: ${reactionEvents.length}, Reposts: ${repostEvents.length}, Replies: ${replyEvents.length}`);
+
+      return { likes, reposts, replies };
+    } catch (error) {
+      console.error('Error getting post interactions:', error);
+      return { likes: new Map(), reposts: new Map(), replies: new Map() };
+    }
+  }
+
+  async getUserLikes() {
+    try {
+      if (!this.publicKey) return new Set();
+
+      // Query for user's reactions (kind 7)
+      const reactionEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [7],
+        authors: [this.publicKey],
+        limit: 1000
+      });
+
+      const likedPosts = new Set();
+      reactionEvents.forEach(event => {
+        const postId = event.tags.find(tag => tag[0] === 'e')?.[1];
+        if (postId) {
+          likedPosts.add(postId);
+        }
+      });
+
+      return likedPosts;
+    } catch (error) {
+      console.error('Error getting user likes:', error);
+      return new Set();
+    }
+  }
+
+  async getUserReposts() {
+    try {
+      if (!this.publicKey) return new Set();
+
+      // Query for user's reposts (kind 6)
+      const repostEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [6],
+        authors: [this.publicKey],
+        limit: 1000
+      });
+
+      const repostedPosts = new Set();
+      repostEvents.forEach(event => {
+        const postId = event.tags.find(tag => tag[0] === 'e')?.[1];
+        if (postId) {
+          repostedPosts.add(postId);
+        }
+      });
+
+      return repostedPosts;
+    } catch (error) {
+      console.error('Error getting user reposts:', error);
+      return new Set();
+    }
+  }
+
   disconnect() {
     try {
       // Close all subscriptions

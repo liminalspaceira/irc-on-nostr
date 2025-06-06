@@ -15,6 +15,7 @@ import SettingsScreen from './screens/SettingsScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import PrivateMessageScreen from './screens/PrivateMessageScreen';
 import PrivateConversationScreen from './screens/PrivateConversationScreen';
+import FeedScreen from './screens/FeedScreen';
 
 // Services
 import { nostrService } from './services/NostrService';
@@ -64,6 +65,8 @@ function MainTabs() {
             iconName = focused ? 'chatbubbles' : 'chatbubbles-outline';
           } else if (route.name === 'Messages') {
             iconName = focused ? 'mail' : 'mail-outline';
+          } else if (route.name === 'Feed') {
+            iconName = focused ? 'newspaper' : 'newspaper-outline';
           } else if (route.name === 'Profile') {
             iconName = focused ? 'person' : 'person-outline';
           } else if (route.name === 'Settings') {
@@ -76,11 +79,14 @@ function MainTabs() {
         tabBarInactiveTintColor: THEMES.DARK.secondaryTextColor,
         headerStyle: {
           backgroundColor: THEMES.DARK.backgroundColor,
+          borderBottomColor: THEMES.DARK.borderColor,
+          borderBottomWidth: 1,
         },
         headerTintColor: THEMES.DARK.textColor,
         tabBarStyle: {
           backgroundColor: THEMES.DARK.cardBackgroundColor,
           borderTopColor: THEMES.DARK.borderColor,
+          borderTopWidth: 1,
         }
       })}
     >
@@ -93,6 +99,11 @@ function MainTabs() {
         name="Messages" 
         component={PrivateMessageScreen}
         options={{ title: 'Private Messages' }}
+      />
+      <Tab.Screen 
+        name="Feed" 
+        component={FeedScreen}
+        options={{ title: 'Feed' }}
       />
       <Tab.Screen 
         name="Profile" 
@@ -115,8 +126,13 @@ function AppNavigator() {
       screenOptions={{
         headerStyle: {
           backgroundColor: THEMES.DARK.backgroundColor,
+          borderBottomColor: THEMES.DARK.borderColor,
+          borderBottomWidth: 1,
         },
         headerTintColor: THEMES.DARK.textColor,
+        headerTitleStyle: {
+          fontWeight: '600',
+        },
       }}
     >
       <Stack.Screen 
