@@ -6,7 +6,9 @@ import {
   FlatList,
   TouchableOpacity,
   Alert,
-  RefreshControl
+  RefreshControl,
+  TextInput,
+  ActivityIndicator
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { nostrService } from '../services/NostrService';
@@ -14,8 +16,11 @@ import { THEMES } from '../utils/constants';
 
 const HomeScreen = ({ navigation, theme = THEMES.DARK }) => {
   const [channels, setChannels] = useState([]);
+  const [filteredChannels, setFilteredChannels] = useState([]);
+  const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [searching, setSearching] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState({ isConnected: false });
 
   useEffect(() => {
@@ -28,6 +33,52 @@ const HomeScreen = ({ navigation, theme = THEMES.DARK }) => {
 
     return () => clearInterval(statusInterval);
   }, []);
+
+  // Update filtered channels when channels change (only for empty search)
+  useEffect(() => {
+    if (searchQuery.trim() === '') {
+      setFilteredChannels(channels);
+    }
+  }, [channels, searchQuery]);
+
+  // Debounced search effect
+  useEffect(() => {
+    if (searchQuery.trim() === '') {
+      setFilteredChannels(channels);
+      return;
+    }
+
+    const searchTimeout = setTimeout(async () => {
+      await performNetworkSearch(searchQuery);
+    }, 800); // Wait 800ms after user stops typing
+
+    return () => clearTimeout(searchTimeout);
+  }, [searchQuery]);
+
+  const performNetworkSearch = async (query) => {
+    if (!query.trim()) return;
+    
+    try {
+      setSearching(true);
+      console.log('🔍 Performing network search for:', query);
+      
+      const searchResults = await nostrService.searchChannels(query, 500);
+      console.log('📡 Search results from network:', searchResults.length);
+      
+      setFilteredChannels(searchResults);
+    } catch (error) {
+      console.error('❌ Search error:', error);
+      // Fallback to local filtering
+      const localFiltered = channels.filter(channel => {
+        const nameMatch = channel.name && channel.name.toLowerCase().includes(query.toLowerCase());
+        const aboutMatch = channel.about && channel.about.toLowerCase().includes(query.toLowerCase());
+        return nameMatch || aboutMatch;
+      });
+      setFilteredChannels(localFiltered);
+    } finally {
+      setSearching(false);
+    }
+  };
 
   const initializeAndLoadChannels = async () => {
     try {
@@ -46,11 +97,18 @@ const HomeScreen = ({ navigation, theme = THEMES.DARK }) => {
   const loadChannels = async () => {
     try {
       const channelList = await nostrService.queryChannels(200);
+      console.log('📡 Loaded', channelList.length, 'channels from relays');
       setChannels(channelList);
+      setFilteredChannels(channelList);
     } catch (error) {
       console.error('Failed to load channels:', error);
       Alert.alert('Error', 'Failed to load channels');
     }
+  };
+
+  const handleSearchChange = (query) => {
+    console.log('🔍 Search query changed:', query);
+    setSearchQuery(query);
   };
 
   const onRefresh = async () => {
@@ -123,12 +181,45 @@ const HomeScreen = ({ navigation, theme = THEMES.DARK }) => {
         </TouchableOpacity>
       </View>
 
+      <View style={styles.searchContainer}>
+        <View style={[styles.searchInputContainer, { backgroundColor: theme.surfaceColor }]}>
+          <Ionicons name="search" size={20} color={theme.secondaryTextColor} style={styles.searchIcon} />
+          <TextInput
+            style={[styles.searchInput, { color: theme.textColor }]}
+            placeholder="Search channels on Nostr network..."
+            placeholderTextColor={theme.secondaryTextColor}
+            value={searchQuery}
+            onChangeText={handleSearchChange}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          {searching && (
+            <ActivityIndicator 
+              size="small" 
+              color={theme.primaryColor} 
+              style={styles.searchSpinner}
+            />
+          )}
+          {searchQuery.length > 0 && !searching && (
+            <TouchableOpacity 
+              onPress={() => handleSearchChange('')}
+              style={styles.clearButton}
+            >
+              <Ionicons name="close-circle" size={20} color={theme.secondaryTextColor} />
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+
       <View style={styles.sectionHeader}>
         <Text style={[styles.sectionTitle, { color: theme.textColor }]}>
-          Public Channels
+          {searchQuery ? 'Network Search Results' : 'Public Channels'}
         </Text>
         <Text style={[styles.channelCount, { color: theme.secondaryTextColor }]}>
-          {channels.length} channels
+          {searching ? 'Searching...' : 
+            `${filteredChannels.length} channel${filteredChannels.length !== 1 ? 's' : ''}`
+          }
+          {searchQuery && !searching && ` found`}
         </Text>
       </View>
 
@@ -140,7 +231,7 @@ const HomeScreen = ({ navigation, theme = THEMES.DARK }) => {
         </View>
       ) : (
         <FlatList
-          data={channels}
+          data={filteredChannels}
           renderItem={renderChannelItem}
           keyExtractor={(item) => item.id}
           style={styles.channelList}
@@ -154,15 +245,18 @@ const HomeScreen = ({ navigation, theme = THEMES.DARK }) => {
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
               <Ionicons 
-                name="chatbubbles-outline" 
+                name={searchQuery ? "search-outline" : "chatbubbles-outline"} 
                 size={64} 
                 color={theme.secondaryTextColor} 
               />
-              <Text style={[styles.emptyText, { color: theme.secondaryTextColor }]}>
-                No channels found
+              <Text style={[styles.emptyText, { color: theme.textColor }]}>
+                {searchQuery ? 'No channels found on Nostr network' : 'No channels found'}
               </Text>
               <Text style={[styles.emptySubtext, { color: theme.secondaryTextColor }]}>
-                Create the first channel to get started
+                {searchQuery 
+                  ? 'Try a different search term or create the channel you\'re looking for'
+                  : 'Create the first channel to get started'
+                }
               </Text>
             </View>
           }
@@ -203,6 +297,32 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  searchContainer: {
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+  },
+  searchInputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  searchIcon: {
+    marginRight: 8,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 16,
+    paddingVertical: 4,
+  },
+  searchSpinner: {
+    marginLeft: 8,
+  },
+  clearButton: {
+    marginLeft: 8,
+    padding: 2,
   },
   sectionHeader: {
     flexDirection: 'row',

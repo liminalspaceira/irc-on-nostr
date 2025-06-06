@@ -29,7 +29,9 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
   const [showPrivateKey, setShowPrivateKey] = useState(false);
   const [importModalVisible, setImportModalVisible] = useState(false);
   const [generateModalVisible, setGenerateModalVisible] = useState(false);
+  const [addRelayModalVisible, setAddRelayModalVisible] = useState(false);
   const [newPrivateKey, setNewPrivateKey] = useState('');
+  const [newRelayUrl, setNewRelayUrl] = useState('');
   const [connectionStatus, setConnectionStatus] = useState({ isConnected: false });
 
   useEffect(() => {
@@ -150,7 +152,7 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
 
   const importPrivateKey = async () => {
     if (!newPrivateKey.trim()) {
-      Alert.alert('Error', 'Please enter a private key');
+      showAlert('Error', 'Please enter a private key');
       return;
     }
 
@@ -163,7 +165,7 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
         try {
           const decoded = nip19.decode(input);
           if (decoded.type !== 'nsec') {
-            Alert.alert('Error', 'Invalid nsec format');
+            showAlert('Error', 'Invalid nsec format');
             return;
           }
           // Convert Uint8Array to hex string
@@ -173,7 +175,7 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
             privateKeyHex = decoded.data;
           }
         } catch (error) {
-          Alert.alert('Error', 'Invalid nsec1 private key format');
+          showAlert('Error', 'Invalid nsec1 private key format');
           return;
         }
       } 
@@ -183,7 +185,7 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
       } 
       // Invalid format
       else {
-        Alert.alert('Error', 'Invalid private key format. Please use either:\n• nsec1... (bech32 format)\n• 64 hex characters');
+        showAlert('Error', 'Invalid private key format. Please use either:\n• nsec1... (bech32 format)\n• 64 hex characters');
         return;
       }
 
@@ -204,10 +206,10 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
       nostrService.privateKey = privateKeyHex;
       nostrService.publicKey = derivedPublicKey;
       
-      Alert.alert('Success', 'Private key imported successfully!');
+      showAlert('Success', 'Private key imported successfully!');
     } catch (error) {
       console.error('Error importing private key:', error);
-      Alert.alert('Error', 'Failed to import private key');
+      showAlert('Error', 'Failed to import private key');
     }
   };
 
@@ -222,13 +224,79 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
     }
   };
 
+  const showAlert = (title, message, buttons = []) => {
+    if (typeof window !== 'undefined') {
+      // Web environment - use modal for complex dialogs, simple alert for basic ones
+      if (buttons.length > 1) {
+        // For confirmation dialogs, we'll handle this in the calling function
+        return false; // Indicates to use modal instead
+      } else {
+        alert(`${title}\n\n${message}`);
+        return true;
+      }
+    } else {
+      // React Native environment
+      Alert.alert(title, message, buttons.length > 0 ? buttons : [{ text: 'OK' }]);
+      return true;
+    }
+  };
+
   const connectToNostr = async () => {
     try {
       await nostrService.initialize();
-      Alert.alert('Success', 'Connected to Nostr relays!');
+      showAlert('Success', 'Connected to Nostr relays!');
     } catch (error) {
       console.error('Connection failed:', error);
-      Alert.alert('Error', 'Failed to connect to Nostr relays');
+      showAlert('Error', 'Failed to connect to Nostr relays');
+    }
+  };
+
+  const validateRelayUrl = (url) => {
+    try {
+      const urlObj = new URL(url);
+      return urlObj.protocol === 'wss:' || urlObj.protocol === 'ws:';
+    } catch (error) {
+      return false;
+    }
+  };
+
+  const addNewRelay = async () => {
+    const trimmedUrl = newRelayUrl.trim();
+    
+    if (!trimmedUrl) {
+      showAlert('Error', 'Please enter a relay URL');
+      return;
+    }
+    
+    if (!validateRelayUrl(trimmedUrl)) {
+      showAlert('Error', 'Please enter a valid WebSocket URL (wss:// or ws://)');
+      return;
+    }
+    
+    if (relays.includes(trimmedUrl)) {
+      showAlert('Error', 'This relay is already in your list');
+      return;
+    }
+
+    try {
+      const updatedRelays = [...relays, trimmedUrl];
+      setRelays(updatedRelays);
+      await AsyncStorage.setItem(STORAGE_KEYS.RELAYS, JSON.stringify(updatedRelays));
+      
+      setNewRelayUrl('');
+      setAddRelayModalVisible(false);
+      
+      showAlert('Success', 'Relay added successfully! Reconnecting to Nostr network...');
+      
+      // Reconnect to include the new relay
+      try {
+        await nostrService.initialize();
+      } catch (error) {
+        console.error('Error reconnecting with new relay:', error);
+      }
+    } catch (error) {
+      console.error('Error adding relay:', error);
+      showAlert('Error', 'Failed to add relay');
     }
   };
 
@@ -370,6 +438,15 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
               }]} />
             </View>
           ))}
+          
+          {/* Add Relay Button */}
+          <TouchableOpacity
+            style={[styles.addRelayButton, { backgroundColor: theme.primaryColor }]}
+            onPress={() => setAddRelayModalVisible(true)}
+          >
+            <Ionicons name="add" size={20} color="white" />
+            <Text style={styles.addRelayButtonText}>Add Relay</Text>
+          </TouchableOpacity>
         </View>
       ))}
 
@@ -461,6 +538,65 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
               >
                 <Text style={[styles.modalButtonText, { color: 'white' }]}>
                   Generate New Identity
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Add Relay Modal */}
+      <Modal
+        visible={addRelayModalVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setAddRelayModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: theme.cardBackgroundColor }]}>
+            <Text style={[styles.modalTitle, { color: theme.textColor }]}>
+              Add Nostr Relay
+            </Text>
+            <Text style={[styles.modalDescription, { color: theme.secondaryTextColor }]}>
+              Enter a WebSocket URL for a Nostr relay:
+              {'\n'}• wss://relay.example.com
+              {'\n'}• Must start with wss:// or ws://
+            </Text>
+            
+            <TextInput
+              style={[styles.modalInput, { 
+                backgroundColor: theme.surfaceColor,
+                color: theme.textColor,
+                borderColor: theme.borderColor
+              }]}
+              value={newRelayUrl}
+              onChangeText={setNewRelayUrl}
+              placeholder="wss://relay.example.com"
+              placeholderTextColor={theme.secondaryTextColor}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+            />
+            
+            <View style={styles.modalActions}>
+              <TouchableOpacity 
+                style={[styles.modalButton, { backgroundColor: theme.borderColor }]}
+                onPress={() => {
+                  setAddRelayModalVisible(false);
+                  setNewRelayUrl('');
+                }}
+              >
+                <Text style={[styles.modalButtonText, { color: theme.textColor }]}>
+                  Cancel
+                </Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity 
+                style={[styles.modalButton, { backgroundColor: theme.primaryColor }]}
+                onPress={addNewRelay}
+              >
+                <Text style={[styles.modalButtonText, { color: 'white' }]}>
+                  Add Relay
                 </Text>
               </TouchableOpacity>
             </View>
@@ -580,6 +716,21 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
+  },
+  addRelayButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    marginTop: 12,
+  },
+  addRelayButtonText: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: 8,
   },
   modalOverlay: {
     flex: 1,

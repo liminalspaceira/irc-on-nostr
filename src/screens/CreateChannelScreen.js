@@ -7,7 +7,8 @@ import {
   TouchableOpacity,
   Alert,
   ScrollView,
-  ActivityIndicator
+  ActivityIndicator,
+  Modal
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { nostrService } from '../services/NostrService';
@@ -18,6 +19,15 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
   const [channelDescription, setChannelDescription] = useState('');
   const [channelPicture, setChannelPicture] = useState('');
   const [isCreating, setIsCreating] = useState(false);
+  
+  // Modal states
+  const [modalVisible, setModalVisible] = useState(false);
+  const [modalConfig, setModalConfig] = useState({
+    title: '',
+    message: '',
+    buttons: [],
+    type: 'info' // 'info', 'success', 'error'
+  });
 
   const validateChannelName = (name) => {
     // Remove # if user types it
@@ -29,34 +39,58 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
     return { cleanName, isValid };
   };
 
+  const showAlert = (title, message, buttons = [], type = 'info') => {
+    if (typeof window !== 'undefined') {
+      // Web environment - use modal
+      setModalConfig({
+        title,
+        message,
+        buttons: buttons.length > 0 ? buttons : [{ text: 'OK', onPress: () => setModalVisible(false) }],
+        type
+      });
+      setModalVisible(true);
+    } else {
+      // React Native environment - use native alerts
+      Alert.alert(title, message, buttons.length > 0 ? buttons : [{ text: 'OK' }]);
+    }
+  };
+
+  const closeModal = () => {
+    setModalVisible(false);
+  };
+
   const createChannel = async () => {
+    console.log('🔧 Creating channel with name:', channelName);
     const { cleanName, isValid } = validateChannelName(channelName);
     
     if (!cleanName.trim()) {
-      Alert.alert('Error', 'Please enter a channel name');
+      showAlert('Error', 'Please enter a channel name', [], 'error');
       return;
     }
     
     if (!isValid) {
-      Alert.alert(
+      showAlert(
         'Invalid Name', 
-        'Channel name can only contain letters, numbers, underscores, and hyphens'
+        'Channel name can only contain letters, numbers, underscores, and hyphens',
+        [],
+        'error'
       );
       return;
     }
     
     if (cleanName.length < 3) {
-      Alert.alert('Error', 'Channel name must be at least 3 characters long');
+      showAlert('Error', 'Channel name must be at least 3 characters long', [], 'error');
       return;
     }
     
     if (cleanName.length > 32) {
-      Alert.alert('Error', 'Channel name must be 32 characters or less');
+      showAlert('Error', 'Channel name must be 32 characters or less', [], 'error');
       return;
     }
 
     try {
       setIsCreating(true);
+      console.log('🚀 Starting channel creation...');
       
       const event = await nostrService.createChannel(
         cleanName,
@@ -64,25 +98,29 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
         channelPicture.trim()
       );
       
-      Alert.alert(
+      console.log('✅ Channel created successfully:', event.id);
+      
+      showAlert(
         'Success!', 
         `Channel #${cleanName} created successfully!`,
         [
           {
             text: 'Join Channel',
             onPress: () => {
+              closeModal();
               navigation.replace('Channel', {
                 channelId: event.id,
                 channelName: cleanName
               });
             }
           }
-        ]
+        ],
+        'success'
       );
       
     } catch (error) {
-      console.error('Failed to create channel:', error);
-      Alert.alert('Error', 'Failed to create channel. Please try again.');
+      console.error('❌ Failed to create channel:', error);
+      showAlert('Error', 'Failed to create channel. Please try again.', [], 'error');
     } finally {
       setIsCreating(false);
     }
@@ -225,6 +263,67 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
           </Text>
         </View>
       </View>
+
+      {/* Custom Modal for Web Compatibility */}
+      <Modal
+        visible={modalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={closeModal}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContainer, { backgroundColor: theme.cardBackgroundColor }]}>
+            <View style={styles.modalHeader}>
+              <Ionicons 
+                name={
+                  modalConfig.type === 'success' ? 'checkmark-circle' :
+                  modalConfig.type === 'error' ? 'alert-circle' : 'information-circle'
+                } 
+                size={48} 
+                color={
+                  modalConfig.type === 'success' ? theme.successColor :
+                  modalConfig.type === 'error' ? theme.errorColor : theme.primaryColor
+                } 
+              />
+              <Text style={[styles.modalTitle, { color: theme.textColor }]}>
+                {modalConfig.title}
+              </Text>
+            </View>
+            
+            <Text style={[styles.modalMessage, { color: theme.secondaryTextColor }]}>
+              {modalConfig.message}
+            </Text>
+            
+            <View style={styles.modalButtons}>
+              {modalConfig.buttons.map((button, index) => (
+                <TouchableOpacity
+                  key={index}
+                  style={[
+                    styles.modalButton,
+                    index === 0 && modalConfig.buttons.length > 1 ? 
+                      { backgroundColor: theme.primaryColor } : 
+                      { backgroundColor: theme.borderColor }
+                  ]}
+                  onPress={() => {
+                    if (button.onPress) {
+                      button.onPress();
+                    } else {
+                      closeModal();
+                    }
+                  }}
+                >
+                  <Text style={[
+                    styles.modalButtonText,
+                    { color: index === 0 && modalConfig.buttons.length > 1 ? 'white' : theme.textColor }
+                  ]}>
+                    {button.text}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 };
@@ -333,6 +432,61 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
     marginLeft: 12,
+  },
+  // Modal styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalContainer: {
+    borderRadius: 16,
+    padding: 24,
+    width: '100%',
+    maxWidth: 400,
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+  },
+  modalHeader: {
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginTop: 12,
+    textAlign: 'center',
+  },
+  modalMessage: {
+    fontSize: 16,
+    lineHeight: 22,
+    textAlign: 'center',
+    marginBottom: 24,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  modalButton: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  modalButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    letterSpacing: 0.5,
   },
 });
 

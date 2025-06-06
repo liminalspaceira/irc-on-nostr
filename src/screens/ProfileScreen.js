@@ -7,7 +7,8 @@ import {
   TouchableOpacity,
   TextInput,
   Alert,
-  Image
+  Image,
+  Modal
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -15,7 +16,7 @@ import { nostrService } from '../services/NostrService';
 import { nostrUtils } from '../utils/nostrUtils';
 import { STORAGE_KEYS, THEMES, EVENT_KINDS } from '../utils/constants';
 
-const ProfileScreen = ({ theme = THEMES.DARK }) => {
+const ProfileScreen = ({ navigation, theme = THEMES.DARK }) => {
   const [publicKey, setPublicKey] = useState('');
   const [profile, setProfile] = useState({
     name: '',
@@ -30,10 +31,16 @@ const ProfileScreen = ({ theme = THEMES.DARK }) => {
   const [following, setFollowing] = useState([]);
   const [followingProfiles, setFollowingProfiles] = useState(new Map());
   const [isLoadingFollowing, setIsLoadingFollowing] = useState(false);
+  const [followers, setFollowers] = useState([]);
+  const [followerProfiles, setFollowerProfiles] = useState(new Map());
+  const [isLoadingFollowers, setIsLoadingFollowers] = useState(false);
+  const [unfollowModalVisible, setUnfollowModalVisible] = useState(false);
+  const [userToUnfollow, setUserToUnfollow] = useState(null);
 
   useEffect(() => {
     loadProfile();
     loadFollowing();
+    loadFollowers();
   }, []);
 
   const loadProfile = async () => {
@@ -41,12 +48,16 @@ const ProfileScreen = ({ theme = THEMES.DARK }) => {
       const storedPublicKey = await AsyncStorage.getItem(STORAGE_KEYS.PUBLIC_KEY);
       const storedProfile = await AsyncStorage.getItem(STORAGE_KEYS.PROFILE);
       
+      console.log('📝 Loading profile...');
+      console.log('🔑 Public key:', storedPublicKey?.substring(0, 8) + '...');
+      
       if (storedPublicKey) {
         setPublicKey(storedPublicKey);
         
         // Try to load profile from storage first
         if (storedProfile) {
           const parsedProfile = JSON.parse(storedProfile);
+          console.log('💽 Loaded profile from storage:', parsedProfile);
           setProfile(parsedProfile);
           setEditedProfile(parsedProfile);
         }
@@ -55,6 +66,7 @@ const ProfileScreen = ({ theme = THEMES.DARK }) => {
         try {
           const nostrProfile = await nostrService.queryUserProfile(storedPublicKey);
           if (nostrProfile) {
+            console.log('📡 Fetched profile from Nostr:', nostrProfile);
             setProfile(nostrProfile);
             setEditedProfile(nostrProfile);
             await AsyncStorage.setItem(STORAGE_KEYS.PROFILE, JSON.stringify(nostrProfile));
@@ -93,6 +105,31 @@ const ProfileScreen = ({ theme = THEMES.DARK }) => {
     }
   };
 
+  const loadFollowers = async () => {
+    try {
+      const storedPublicKey = await AsyncStorage.getItem(STORAGE_KEYS.PUBLIC_KEY);
+      if (!storedPublicKey) return;
+
+      setIsLoadingFollowers(true);
+      
+      // Get users who follow this user
+      const followersList = await nostrService.getUserFollowers(storedPublicKey);
+      setFollowers(followersList);
+
+      if (followersList.length > 0) {
+        // Get profiles for all followers
+        const profiles = await nostrService.getMultipleUserProfiles(followersList);
+        setFollowerProfiles(profiles);
+        
+        console.log(`Loaded ${followersList.length} followers, got ${profiles.size} profiles`);
+      }
+    } catch (error) {
+      console.error('Error loading followers:', error);
+    } finally {
+      setIsLoadingFollowers(false);
+    }
+  };
+
   const saveProfile = async () => {
     if (!editedProfile.name?.trim()) {
       Alert.alert('Error', 'Name is required');
@@ -101,6 +138,7 @@ const ProfileScreen = ({ theme = THEMES.DARK }) => {
 
     try {
       setIsSaving(true);
+      console.log('💾 Saving profile:', editedProfile);
       
       // Create Nostr profile event
       const profileEvent = nostrUtils.createEvent(
@@ -110,13 +148,17 @@ const ProfileScreen = ({ theme = THEMES.DARK }) => {
       
       // Publish to Nostr
       await nostrService.publishEvent(profileEvent);
+      console.log('📡 Profile published to Nostr');
       
       // Save locally
       await AsyncStorage.setItem(STORAGE_KEYS.PROFILE, JSON.stringify(editedProfile));
+      console.log('💽 Profile saved locally');
       
-      setProfile(editedProfile);
+      // Update profile state immediately
+      setProfile({ ...editedProfile });
       setIsEditing(false);
       
+      console.log('✅ Profile state updated:', editedProfile);
       Alert.alert('Success', 'Profile updated successfully!');
     } catch (error) {
       console.error('Error saving profile:', error);
@@ -136,12 +178,101 @@ const ProfileScreen = ({ theme = THEMES.DARK }) => {
       ...prev,
       [field]: value
     }));
+    
+    // Log when picture URL is being updated for debugging
+    if (field === 'picture') {
+      console.log('🖼️ Profile picture URL updated:', value);
+    }
+  };
+
+  const showAlert = (title, message, buttons = []) => {
+    if (typeof window !== 'undefined') {
+      // Web environment - use modal for confirmation dialogs
+      if (buttons.length > 1) {
+        return false; // Indicates to use modal instead
+      } else {
+        alert(`${title}\n\n${message}`);
+        return true;
+      }
+    } else {
+      // React Native environment
+      Alert.alert(title, message, buttons.length > 0 ? buttons : [{ text: 'OK' }]);
+      return true;
+    }
   };
 
   const copyPublicKey = () => {
     if (navigator.clipboard) {
       navigator.clipboard.writeText(publicKey);
-      Alert.alert('Copied', 'Public key copied to clipboard');
+      showAlert('Copied', 'Public key copied to clipboard');
+    }
+  };
+
+  const handleUnfollowPress = (pubkey, userName) => {
+    console.log('👋 Unfollow button pressed for:', userName);
+    const userInfo = { pubkey, name: userName };
+    setUserToUnfollow(userInfo);
+    
+    // Try using native alert first, fallback to modal if needed
+    const alertShown = showAlert(
+      'Unfollow User',
+      `Are you sure you want to unfollow ${userName}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Unfollow', style: 'destructive', onPress: () => confirmUnfollow(userInfo) }
+      ]
+    );
+    
+    if (!alertShown) {
+      // Use modal for web
+      setUnfollowModalVisible(true);
+    }
+  };
+
+  const confirmUnfollow = async (userInfo) => {
+    try {
+      console.log('🚫 Unfollowing user:', userInfo.name);
+      
+      // Remove from following list
+      const updatedFollowing = following.filter(pubkey => pubkey !== userInfo.pubkey);
+      setFollowing(updatedFollowing);
+      
+      // Remove from profiles map
+      const updatedProfiles = new Map(followingProfiles);
+      updatedProfiles.delete(userInfo.pubkey);
+      setFollowingProfiles(updatedProfiles);
+      
+      // Update contacts list on Nostr
+      const contactsEvent = nostrUtils.createEvent(
+        EVENT_KINDS.CONTACTS,
+        '',
+        updatedFollowing.map(pubkey => ['p', pubkey])
+      );
+      
+      await nostrService.publishEvent(contactsEvent);
+      console.log('✅ Updated contacts list published to Nostr');
+      
+      showAlert('Success', `You have unfollowed ${userInfo.name}`);
+      
+    } catch (error) {
+      console.error('❌ Error unfollowing user:', error);
+      showAlert('Error', 'Failed to unfollow user');
+      
+      // Revert the UI changes on error
+      loadFollowing();
+    } finally {
+      setUnfollowModalVisible(false);
+      setUserToUnfollow(null);
+    }
+  };
+
+  const navigateToUserProfile = (userPubkey, userName) => {
+    if (navigation) {
+      console.log('👤 Navigating to user profile:', userName, userPubkey.substring(0, 8) + '...');
+      navigation.navigate('UserProfile', {
+        userPubkey,
+        userName: userName || 'Unknown User'
+      });
     }
   };
 
@@ -184,8 +315,18 @@ const ProfileScreen = ({ theme = THEMES.DARK }) => {
     <ScrollView style={[styles.container, { backgroundColor: theme.backgroundColor }]}>
       <View style={[styles.header, { backgroundColor: theme.cardBackgroundColor }]}>
         <View style={styles.avatarContainer}>
-          {profile.picture ? (
-            <Image source={{ uri: profile.picture }} style={styles.avatar} />
+          {/* Show editedProfile picture if editing and has value, otherwise use saved profile picture */}
+          {(isEditing ? editedProfile.picture : profile.picture) ? (
+            <Image 
+              source={{ uri: isEditing ? editedProfile.picture : profile.picture }} 
+              style={styles.avatar}
+              onError={(error) => {
+                console.log('❌ Error loading profile image:', error.nativeEvent.error);
+              }}
+              onLoad={() => {
+                console.log('✅ Profile image loaded successfully');
+              }}
+            />
           ) : (
             <View style={[styles.avatarPlaceholder, { backgroundColor: theme.primaryColor }]}>
               <Ionicons name="person" size={40} color="white" />
@@ -268,23 +409,34 @@ const ProfileScreen = ({ theme = THEMES.DARK }) => {
               const profile = followingProfiles.get(pubkey);
               return (
                 <View key={pubkey} style={[styles.followingItem, { backgroundColor: theme.surfaceColor }]}>
-                  <View style={styles.followingAvatar}>
-                    {profile?.picture ? (
-                      <Image source={{ uri: profile.picture }} style={styles.followingAvatarImage} />
-                    ) : (
-                      <View style={[styles.followingAvatarPlaceholder, { backgroundColor: theme.primaryColor }]}>
-                        <Ionicons name="person" size={20} color="white" />
-                      </View>
-                    )}
-                  </View>
-                  <View style={styles.followingInfo}>
-                    <Text style={[styles.followingName, { color: theme.textColor }]} numberOfLines={1}>
-                      {profile?.name || profile?.display_name || 'Unnamed'}
-                    </Text>
-                    <Text style={[styles.followingPubkey, { color: theme.secondaryTextColor }]} numberOfLines={1}>
-                      {pubkey.substring(0, 8)}...
-                    </Text>
-                  </View>
+                  <TouchableOpacity
+                    style={styles.followingUserInfo}
+                    onPress={() => navigateToUserProfile(pubkey, profile?.name || profile?.display_name)}
+                  >
+                    <View style={styles.followingAvatar}>
+                      {profile?.picture ? (
+                        <Image source={{ uri: profile.picture }} style={styles.followingAvatarImage} />
+                      ) : (
+                        <View style={[styles.followingAvatarPlaceholder, { backgroundColor: theme.primaryColor }]}>
+                          <Ionicons name="person" size={20} color="white" />
+                        </View>
+                      )}
+                    </View>
+                    <View style={styles.followingInfo}>
+                      <Text style={[styles.followingName, { color: theme.textColor }]} numberOfLines={1}>
+                        {profile?.name || profile?.display_name || 'Unnamed'}
+                      </Text>
+                      <Text style={[styles.followingPubkey, { color: theme.secondaryTextColor }]} numberOfLines={1}>
+                        {pubkey.substring(0, 8)}...
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.unfollowButton, { backgroundColor: theme.errorColor }]}
+                    onPress={() => handleUnfollowPress(pubkey, profile?.name || profile?.display_name || 'Unnamed')}
+                  >
+                    <Ionicons name="person-remove" size={16} color="white" />
+                  </TouchableOpacity>
                 </View>
               );
             })}
@@ -304,6 +456,64 @@ const ProfileScreen = ({ theme = THEMES.DARK }) => {
         )}
       </View>
 
+      <View style={[styles.content, { backgroundColor: theme.cardBackgroundColor }]}>
+        <View style={styles.followingSectionHeader}>
+          <Text style={[styles.sectionTitle, { color: theme.textColor }]}>
+            Followers ({followers.length})
+          </Text>
+          {isLoadingFollowers && (
+            <Text style={[styles.loadingText, { color: theme.secondaryTextColor }]}>
+              Loading...
+            </Text>
+          )}
+        </View>
+        
+        {followers.length > 0 ? (
+          <View style={styles.followingGrid}>
+            {followers.map((pubkey) => {
+              const profile = followerProfiles.get(pubkey);
+              return (
+                <TouchableOpacity
+                  key={pubkey}
+                  style={[styles.followingItem, { backgroundColor: theme.surfaceColor }]}
+                  onPress={() => navigateToUserProfile(pubkey, profile?.name || profile?.display_name)}
+                >
+                  <View style={styles.followingAvatar}>
+                    {profile?.picture ? (
+                      <Image source={{ uri: profile.picture }} style={styles.followingAvatarImage} />
+                    ) : (
+                      <View style={[styles.followingAvatarPlaceholder, { backgroundColor: theme.primaryColor }]}>
+                        <Ionicons name="person" size={20} color="white" />
+                      </View>
+                    )}
+                  </View>
+                  <View style={styles.followingInfo}>
+                    <Text style={[styles.followingName, { color: theme.textColor }]} numberOfLines={1}>
+                      {profile?.name || profile?.display_name || 'Unnamed'}
+                    </Text>
+                    <Text style={[styles.followingPubkey, { color: theme.secondaryTextColor }]} numberOfLines={1}>
+                      {pubkey.substring(0, 8)}...
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        ) : (
+          !isLoadingFollowers && (
+            <View style={styles.emptyState}>
+              <Ionicons name="people-outline" size={48} color={theme.secondaryTextColor} />
+              <Text style={[styles.emptyStateText, { color: theme.secondaryTextColor }]}>
+                No followers yet
+              </Text>
+              <Text style={[styles.emptyStateSubtext, { color: theme.secondaryTextColor }]}>
+                Share your profile to get followers
+              </Text>
+            </View>
+          )
+        )}
+      </View>
+
       <View style={[styles.infoCard, { backgroundColor: theme.cardBackgroundColor }]}>
         <Ionicons name="information-circle" size={24} color={theme.primaryColor} />
         <View style={styles.infoContent}>
@@ -316,6 +526,52 @@ const ProfileScreen = ({ theme = THEMES.DARK }) => {
           </Text>
         </View>
       </View>
+
+      {/* Unfollow Confirmation Modal */}
+      <Modal
+        visible={unfollowModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setUnfollowModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContainer, { backgroundColor: theme.cardBackgroundColor }]}>
+            <View style={styles.modalHeader}>
+              <Ionicons name="person-remove" size={48} color={theme.errorColor} />
+              <Text style={[styles.modalTitle, { color: theme.textColor }]}>
+                Unfollow User
+              </Text>
+            </View>
+            
+            <Text style={[styles.modalMessage, { color: theme.secondaryTextColor }]}>
+              Are you sure you want to unfollow {userToUnfollow?.name}? You won't see their posts in your feed anymore.
+            </Text>
+            
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.modalButton, { backgroundColor: theme.borderColor }]}
+                onPress={() => {
+                  setUnfollowModalVisible(false);
+                  setUserToUnfollow(null);
+                }}
+              >
+                <Text style={[styles.modalButtonText, { color: theme.textColor }]}>
+                  Cancel
+                </Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity
+                style={[styles.modalButton, { backgroundColor: theme.errorColor }]}
+                onPress={() => confirmUnfollow(userToUnfollow)}
+              >
+                <Text style={[styles.modalButtonText, { color: 'white' }]}>
+                  Unfollow
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 };
@@ -457,6 +713,7 @@ const styles = StyleSheet.create({
     minWidth: '48%',
     flexBasis: '48%',
     maxWidth: '48%',
+    position: 'relative',
   },
   followingAvatar: {
     marginRight: 12,
@@ -473,8 +730,14 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  followingUserInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
   followingInfo: {
     flex: 1,
+    marginRight: 8,
   },
   followingName: {
     fontSize: 14,
@@ -484,6 +747,13 @@ const styles = StyleSheet.create({
   followingPubkey: {
     fontSize: 12,
     fontFamily: 'monospace',
+  },
+  unfollowButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   emptyState: {
     alignItems: 'center',
@@ -498,6 +768,61 @@ const styles = StyleSheet.create({
   emptyStateSubtext: {
     fontSize: 14,
     textAlign: 'center',
+  },
+  // Modal styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalContainer: {
+    borderRadius: 16,
+    padding: 24,
+    width: '100%',
+    maxWidth: 400,
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+  },
+  modalHeader: {
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginTop: 12,
+    textAlign: 'center',
+  },
+  modalMessage: {
+    fontSize: 16,
+    lineHeight: 22,
+    textAlign: 'center',
+    marginBottom: 24,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  modalButton: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  modalButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    letterSpacing: 0.5,
   },
 });
 

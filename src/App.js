@@ -16,6 +16,7 @@ import ProfileScreen from './screens/ProfileScreen';
 import PrivateMessageScreen from './screens/PrivateMessageScreen';
 import PrivateConversationScreen from './screens/PrivateConversationScreen';
 import FeedScreen from './screens/FeedScreen';
+import UserProfileScreen from './screens/UserProfileScreen';
 
 // Services
 import { nostrService } from './services/NostrService';
@@ -161,6 +162,14 @@ function AppNavigator() {
         component={PrivateConversationScreen}
         options={({ route }) => ({ 
           title: route.params?.contactName || 'Private Chat',
+          presentation: 'card'
+        })}
+      />
+      <Stack.Screen 
+        name="UserProfile" 
+        component={UserProfileScreen}
+        options={({ route }) => ({ 
+          title: route.params?.userName || 'User Profile',
           presentation: 'card'
         })}
       />

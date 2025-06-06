@@ -20,7 +20,7 @@ import { STORAGE_KEYS, THEMES } from '../utils/constants';
 
 const { width: screenWidth } = Dimensions.get('window');
 
-const FeedScreen = ({ theme = THEMES.DARK }) => {
+const FeedScreen = ({ navigation, theme = THEMES.DARK }) => {
   const [posts, setPosts] = useState([]);
   const [threads, setThreads] = useState(new Map());
   const [userProfiles, setUserProfiles] = useState(new Map());
@@ -37,6 +37,10 @@ const FeedScreen = ({ theme = THEMES.DARK }) => {
   const [showRepostModal, setShowRepostModal] = useState(false);
   const [selectedPost, setSelectedPost] = useState(null);
   const [replyText, setReplyText] = useState('');
+  const [showCreatePostModal, setShowCreatePostModal] = useState(false);
+  const [newPostText, setNewPostText] = useState('');
+  const [newPostImages, setNewPostImages] = useState([]);
+  const [isPosting, setIsPosting] = useState(false);
   const [postInteractions, setPostInteractions] = useState({
     likes: new Map(),
     reposts: new Map(),
@@ -439,6 +443,63 @@ const FeedScreen = ({ theme = THEMES.DARK }) => {
     }
   };
 
+  const handleCreatePost = () => {
+    console.log('✏️ Create post button pressed');
+    setNewPostText('');
+    setNewPostImages([]);
+    setShowCreatePostModal(true);
+  };
+
+  const addImageUrl = () => {
+    const imageUrl = prompt('Enter image URL:');
+    if (imageUrl && imageUrl.trim()) {
+      setNewPostImages(prev => [...prev, imageUrl.trim()]);
+    }
+  };
+
+  const removeImage = (index) => {
+    setNewPostImages(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const confirmCreatePost = async () => {
+    if (!newPostText.trim() && newPostImages.length === 0) {
+      alert('Post cannot be empty');
+      return;
+    }
+    
+    try {
+      console.log('📝 Creating new post...');
+      setIsPosting(true);
+      setShowCreatePostModal(false);
+      
+      // Combine text and images
+      let postContent = newPostText.trim();
+      if (newPostImages.length > 0) {
+        if (postContent) {
+          postContent += '\n\n';
+        }
+        postContent += newPostImages.join('\n');
+      }
+      
+      const result = await nostrService.createTextNote(postContent);
+      console.log('✅ Post result:', result);
+      
+      setTimeout(() => {
+        alert('Post created! Event published to Nostr network.');
+        loadFeed(true);
+      }, 100);
+    } catch (error) {
+      console.error('❌ Error creating post:', error);
+      setTimeout(() => {
+        alert(`Failed to create post: ${error.message}`);
+      }, 100);
+    } finally {
+      setIsPosting(false);
+      setNewPostText('');
+      setNewPostImages([]);
+    }
+  };
+
   const formatTime = (timestamp) => {
     const now = Math.floor(Date.now() / 1000);
     const diff = now - timestamp;
@@ -447,6 +508,14 @@ const FeedScreen = ({ theme = THEMES.DARK }) => {
     if (diff < 3600) return `${Math.floor(diff / 60)}m`;
     if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
     return `${Math.floor(diff / 86400)}d`;
+  };
+
+  const navigateToUserProfile = (userPubkey, userName) => {
+    console.log('👤 Navigating to user profile:', userName, userPubkey.substring(0, 8) + '...');
+    navigation.navigate('UserProfile', {
+      userPubkey,
+      userName: userName || 'Unknown User'
+    });
   };
 
   const renderPost = (post, isReply = false, depth = 0) => {
@@ -476,9 +545,14 @@ const FeedScreen = ({ theme = THEMES.DARK }) => {
               </View>
             )}
             <View style={styles.authorText}>
-              <Text style={[styles.authorName, { color: theme.textColor }]}>
-                {profile?.name || profile?.display_name || 'Unnamed'}
-              </Text>
+              <TouchableOpacity 
+                onPress={() => navigateToUserProfile(post.pubkey, profile?.name || profile?.display_name)}
+                style={styles.authorNameContainer}
+              >
+                <Text style={[styles.authorName, { color: theme.primaryColor }]}>
+                  {profile?.name || profile?.display_name || 'Unnamed'}
+                </Text>
+              </TouchableOpacity>
               <Text style={[styles.timestamp, { color: theme.secondaryTextColor }]}>
                 {formatTime(post.created_at)}
               </Text>
@@ -598,7 +672,17 @@ const FeedScreen = ({ theme = THEMES.DARK }) => {
                       color={theme.secondaryTextColor} 
                     />
                     <Text style={[styles.expandButtonText, { color: theme.secondaryTextColor }]}>
-                      {isExpanded ? 'Hide' : 'Show'} {authorName}'s reply
+                      {isExpanded ? 'Hide' : 'Show'} 
+                      <Text 
+                        style={{ color: theme.primaryColor }}
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          navigateToUserProfile(reply.pubkey, authorName);
+                        }}
+                      >
+                        {authorName}
+                      </Text>
+                      's reply
                     </Text>
                   </TouchableOpacity>
                   
@@ -669,16 +753,17 @@ const FeedScreen = ({ theme = THEMES.DARK }) => {
   }
 
   return (
-    <ScrollView 
-      style={[styles.container, { backgroundColor: theme.backgroundColor }]}
-      refreshControl={
-        <RefreshControl
-          refreshing={isRefreshing}
-          onRefresh={() => loadFeed(true)}
-          tintColor={theme.primaryColor}
-        />
-      }
-    >
+    <View style={[styles.container, { backgroundColor: theme.backgroundColor }]}>
+      <ScrollView 
+        style={styles.scrollView}
+        refreshControl={
+          <RefreshControl
+            refreshing={isRefreshing}
+            onRefresh={() => loadFeed(true)}
+            tintColor={theme.primaryColor}
+          />
+        }
+      >
       <View style={styles.feedHeader}>
         <Text style={[styles.feedTitle, { color: theme.textColor }]}>
           Feed
@@ -783,12 +868,118 @@ const FeedScreen = ({ theme = THEMES.DARK }) => {
           </View>
         </View>
       </Modal>
-    </ScrollView>
+
+      {/* Create Post Modal */}
+      <Modal
+        visible={showCreatePostModal}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setShowCreatePostModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.createPostModalContainer, { backgroundColor: theme.cardBackgroundColor }]}>
+            <View style={styles.createPostHeader}>
+              <Text style={[styles.modalTitle, { color: theme.textColor }]}>Create Post</Text>
+              <TouchableOpacity 
+                onPress={() => setShowCreatePostModal(false)}
+                style={styles.closeButton}
+              >
+                <Ionicons name="close" size={24} color={theme.textColor} />
+              </TouchableOpacity>
+            </View>
+            
+            <TextInput
+              style={[styles.createPostInput, { 
+                backgroundColor: theme.surfaceColor,
+                color: theme.textColor,
+                borderColor: theme.borderColor
+              }]}
+              value={newPostText}
+              onChangeText={setNewPostText}
+              placeholder="What's on your mind?"
+              placeholderTextColor={theme.secondaryTextColor}
+              multiline={true}
+              numberOfLines={8}
+              textAlignVertical="top"
+            />
+
+            {/* Image URLs */}
+            {newPostImages.length > 0 && (
+              <View style={styles.imagePreviewContainer}>
+                <Text style={[styles.imagePreviewTitle, { color: theme.textColor }]}>
+                  Images ({newPostImages.length})
+                </Text>
+                {newPostImages.map((imageUrl, index) => (
+                  <View key={index} style={styles.imagePreviewItem}>
+                    <Image 
+                      source={{ uri: imageUrl }} 
+                      style={styles.imagePreview}
+                      resizeMode="cover"
+                    />
+                    <TouchableOpacity 
+                      onPress={() => removeImage(index)}
+                      style={[styles.removeImageButton, { backgroundColor: theme.errorColor }]}
+                    >
+                      <Ionicons name="trash" size={16} color="white" />
+                    </TouchableOpacity>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            <View style={styles.createPostActions}>
+              <TouchableOpacity 
+                style={[styles.imageButton, { backgroundColor: theme.surfaceColor }]}
+                onPress={addImageUrl}
+              >
+                <Ionicons name="image" size={20} color={theme.primaryColor} />
+                <Text style={[styles.imageButtonText, { color: theme.primaryColor }]}>
+                  Add Image
+                </Text>
+              </TouchableOpacity>
+            </View>
+            
+            <View style={styles.modalButtons}>
+              <TouchableOpacity 
+                style={[styles.modalButton, { backgroundColor: theme.borderColor }]}
+                onPress={() => setShowCreatePostModal(false)}
+              >
+                <Text style={[styles.modalButtonText, { color: theme.textColor }]}>Cancel</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity 
+                style={[styles.modalButton, { 
+                  backgroundColor: isPosting ? theme.borderColor : theme.primaryColor 
+                }]}
+                onPress={confirmCreatePost}
+                disabled={isPosting}
+              >
+                <Text style={[styles.modalButtonText, { color: 'white' }]}>
+                  {isPosting ? 'Posting...' : 'Post'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+      </ScrollView>
+
+      {/* Floating Action Button */}
+      <TouchableOpacity
+        style={[styles.fab, { backgroundColor: theme.primaryColor }]}
+        onPress={handleCreatePost}
+      >
+        <Ionicons name="add" size={24} color="white" />
+      </TouchableOpacity>
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
+    flex: 1,
+  },
+  scrollView: {
     flex: 1,
     padding: 12,
   },
@@ -854,6 +1045,9 @@ const styles = StyleSheet.create({
   },
   authorText: {
     flex: 1,
+  },
+  authorNameContainer: {
+    alignSelf: 'flex-start',
   },
   authorName: {
     fontSize: 14,
@@ -991,6 +1185,97 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     letterSpacing: 0.5,
+  },
+  // Floating Action Button
+  fab: {
+    position: 'absolute',
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    right: 16,
+    bottom: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+  },
+  // Create Post Modal
+  createPostModalContainer: {
+    width: '100%',
+    maxWidth: 500,
+    borderRadius: 16,
+    padding: 24,
+    maxHeight: '90%',
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+  },
+  createPostHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  closeButton: {
+    padding: 4,
+  },
+  createPostInput: {
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 16,
+    fontSize: 16,
+    minHeight: 120,
+    maxHeight: 200,
+    marginBottom: 16,
+    fontFamily: 'System',
+  },
+  createPostActions: {
+    marginBottom: 20,
+  },
+  imageButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    alignSelf: 'flex-start',
+  },
+  imageButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: 8,
+  },
+  imagePreviewContainer: {
+    marginBottom: 16,
+  },
+  imagePreviewTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 12,
+  },
+  imagePreviewItem: {
+    position: 'relative',
+    marginBottom: 12,
+  },
+  imagePreview: {
+    width: '100%',
+    height: 120,
+    borderRadius: 8,
+  },
+  removeImageButton: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 });
 

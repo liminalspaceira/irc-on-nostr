@@ -437,6 +437,126 @@ class NostrService {
     }
   }
 
+  async searchChannels(searchQuery, limit = 500) {
+    try {
+      console.log('🔍 Searching channels on Nostr network for:', searchQuery);
+      console.log('Connected relays:', Array.from(this.connectedRelays));
+      
+      return new Promise((resolve) => {
+        const channels = [];
+        let timeoutId;
+        
+        // Query more channels for search (500 instead of 200)
+        const filters = {
+          kinds: [EVENT_KINDS.CHANNEL_CREATION],
+          limit: limit
+        };
+        
+        console.log('Search filters:', filters);
+        
+        const subscription = this.pool.subscribeMany(
+          Array.from(this.connectedRelays),
+          [filters],
+          {
+            onevent: (event) => {
+              const channel = nostrUtils.parseChannelEvent(event);
+              if (channel) {
+                // Filter by search query on name and description
+                const nameMatch = channel.name && channel.name.toLowerCase().includes(searchQuery.toLowerCase());
+                const aboutMatch = channel.about && channel.about.toLowerCase().includes(searchQuery.toLowerCase());
+                
+                if (nameMatch || aboutMatch) {
+                  // Check if we already have this channel
+                  const exists = channels.find(c => c.id === channel.id);
+                  if (!exists) {
+                    channels.push(channel);
+                    console.log('🎯 Found matching channel:', channel.name);
+                  }
+                }
+              }
+            },
+            oneose: () => {
+              console.log('📬 End of search, found', channels.length, 'matching channels');
+              clearTimeout(timeoutId);
+              subscription.close();
+              
+              // Sort by creation time (newest first)
+              const sortedChannels = channels.sort((a, b) => b.createdAt - a.createdAt);
+              console.log('✅ Returning', sortedChannels.length, 'search results');
+              resolve(sortedChannels);
+            }
+          }
+        );
+        
+        // Shorter timeout for search (8 seconds)
+        timeoutId = setTimeout(() => {
+          console.log('⏰ Search timeout, returning', channels.length, 'results');
+          subscription.close();
+          
+          // Sort by creation time (newest first)
+          const sortedChannels = channels.sort((a, b) => b.createdAt - a.createdAt);
+          resolve(sortedChannels);
+        }, 8000);
+      });
+    } catch (error) {
+      console.error('Error searching channels:', error);
+      return [];
+    }
+  }
+
+  async getUserPosts(userPubkey, limit = 50) {
+    try {
+      console.log('📝 Querying posts for user:', userPubkey.substring(0, 8) + '...');
+      
+      return new Promise((resolve) => {
+        const posts = [];
+        let timeoutId;
+        
+        const filters = {
+          kinds: [EVENT_KINDS.TEXT_NOTE], // Kind 1 - text notes
+          authors: [userPubkey],
+          limit: limit
+        };
+        
+        console.log('User posts filters:', filters);
+        
+        const subscription = this.pool.subscribeMany(
+          Array.from(this.connectedRelays),
+          [filters],
+          {
+            onevent: (event) => {
+              // Only include regular text notes, not replies
+              const isReply = event.tags && event.tags.some(tag => tag[0] === 'e');
+              if (!isReply) {
+                const exists = posts.find(p => p.id === event.id);
+                if (!exists) {
+                  posts.push(event);
+                  console.log('📄 Found post from user');
+                }
+              }
+            },
+            oneose: () => {
+              console.log('📬 End of user posts query, found', posts.length, 'posts');
+              clearTimeout(timeoutId);
+              subscription.close();
+              resolve(posts);
+            }
+          }
+        );
+        
+        // Timeout after 10 seconds
+        timeoutId = setTimeout(() => {
+          console.log('⏰ User posts query timeout, returning', posts.length, 'posts');
+          subscription.close();
+          resolve(posts);
+        }, 10000);
+      });
+    } catch (error) {
+      console.error('Error querying user posts:', error);
+      return [];
+    }
+  }
+
   async queryChannelMessages(channelId, limit = 100, since = null) {
     try {
       const queryId = Math.random().toString(36).substring(2, 8);
@@ -537,8 +657,30 @@ class NostrService {
 
   async queryUserProfile(pubkey) {
     try {
-      // For now, return null
-      console.log(`Querying profile for ${pubkey} - returning null for now`);
+      console.log(`🔍 Querying profile for ${pubkey.substring(0, 8)}...`);
+      
+      // Query for user profile metadata (kind 0)
+      const profileEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [0],
+        authors: [pubkey],
+        limit: 1
+      });
+
+      if (profileEvents.length > 0) {
+        // Get the most recent profile event
+        const latestProfile = profileEvents.sort((a, b) => b.created_at - a.created_at)[0];
+        
+        try {
+          const profileData = JSON.parse(latestProfile.content);
+          console.log('✅ Profile found:', profileData.name || 'Unnamed');
+          return profileData;
+        } catch (parseError) {
+          console.warn('Failed to parse profile data for:', pubkey.substring(0, 8));
+          return null;
+        }
+      }
+
+      console.log('📭 No profile found for user');
       return null;
     } catch (error) {
       console.error('Error querying user profile:', error);
@@ -868,6 +1010,45 @@ class NostrService {
     }
   }
 
+  async getUserFollowers(pubkey, limit = 200) {
+    try {
+      console.log(`🔍 Finding followers for user ${pubkey.substring(0, 8)}...`);
+      
+      // Query for contact lists (kind 3) that include this user in their p tags
+      const followerEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [3], // Contact lists
+        '#p': [pubkey], // Contact lists that mention this pubkey
+        limit: limit
+      });
+
+      console.log(`📡 Found ${followerEvents.length} contact list events mentioning user`);
+
+      // Extract unique followers
+      const followers = new Set();
+      const followerProfiles = new Map();
+
+      for (const event of followerEvents) {
+        // Check if this contact list actually includes our user
+        const includesUser = event.tags.some(tag => 
+          tag[0] === 'p' && tag[1] === pubkey
+        );
+        
+        if (includesUser) {
+          followers.add(event.pubkey);
+          console.log(`👤 Found follower: ${event.pubkey.substring(0, 8)}...`);
+        }
+      }
+
+      const followersList = Array.from(followers);
+      console.log(`✅ Total unique followers found: ${followersList.length}`);
+      
+      return followersList;
+    } catch (error) {
+      console.error('Error getting user followers:', error);
+      return [];
+    }
+  }
+
   async getMultipleUserProfiles(pubkeys) {
     try {
       if (!pubkeys || pubkeys.length === 0) {
@@ -1110,6 +1291,35 @@ class NostrService {
       return signedEvent;
     } catch (error) {
       console.error('Error replying to post:', error);
+      throw error;
+    }
+  }
+
+  async createTextNote(content) {
+    try {
+      if (!this.privateKey) {
+        throw new Error('No private key available for posting');
+      }
+
+      if (!content || !content.trim()) {
+        throw new Error('Post content cannot be empty');
+      }
+
+      console.log('📝 Creating new text note...');
+      
+      // Create text note event (kind 1)
+      const textNoteEvent = {
+        kind: 1, // Text note
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [],
+        content: content.trim(),
+      };
+
+      const signedEvent = await this.publishEvent(textNoteEvent);
+      console.log('✅ Text note published:', signedEvent.id);
+      return signedEvent;
+    } catch (error) {
+      console.error('❌ Error creating text note:', error);
       throw error;
     }
   }
