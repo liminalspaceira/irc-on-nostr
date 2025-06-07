@@ -201,10 +201,27 @@ export default function App() {
         console.log('🔑 No keys found - user can import or generate them');
       }
       
-      // Initialize bot service
+      // Initialize Nostr service first (if we have keys)
+      if (privateKey && publicKey) {
+        try {
+          await nostrService.initialize();
+          console.log('✅ Nostr service initialized');
+        } catch (error) {
+          console.error('⚠️ Nostr service initialization failed:', error);
+        }
+      }
+      
+      // Initialize bot service after Nostr service
       try {
         await botService.initialize();
         console.log('✅ Bot service initialized');
+        
+        // Check if bot service is ready
+        if (botService.isReady()) {
+          console.log('✅ Bot service is ready and running');
+        } else {
+          console.log('⚠️ Bot service initialized but not ready');
+        }
       } catch (error) {
         console.error('⚠️ Bot service initialization failed:', error);
         // Continue without bots

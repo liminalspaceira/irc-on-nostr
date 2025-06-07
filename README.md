@@ -12,28 +12,47 @@ A decentralized IRC-like chat application built on the Nostr protocol, bringing 
 - **User Operations**: Channel operators with comprehensive moderation powers
 - **Classic IRC Navigation**: Traditional IRC workflow with modern UI
 
-### 🤖 Comprehensive Bot System (15 Commands)
+### 🤖 Advanced Bot Ecosystem (32 Commands)
 
-#### 🛠️ Helper & Information Commands
+#### 🛠️ Helper & Information Commands (4 Commands)
 - `!help [command]` - Show comprehensive help or specific command help with examples
 - `!commands` - List all available bot and IRC commands with descriptions  
 - `!about` - Show detailed information about the IRC on Nostr system and features
 - `!time` - Show current server time with timezone information and Unix timestamp
 
-#### 📊 Statistics & Monitoring Commands  
+#### 📊 Statistics & Monitoring Commands (2 Commands)
 - `!stats` - Detailed channel statistics with message counts and user activity
 - `!uptime` - Show bot uptime, framework status, and operational statistics
 
-#### 🌤️ Weather Information Commands
+#### 🌤️ Weather Information Commands (2 Commands)
 - `!weather [location]` - Get current weather with real OpenWeatherMap API or simulated data
 - `!forecast [location]` - Get detailed 3-day weather forecast with conditions
 
-#### 🎮 Gaming & Entertainment Commands
+#### 🎮 Gaming & Entertainment Commands (7 Commands)
 - `!roll [dice]` - Advanced dice rolling with D&D notation (`2d6+3`, `d20`, modifiers, critical detection)
 - `!flip` - Flip a coin with heads/tails results
 - `!8ball [question]` - Magic 8-ball with 20 different mystical responses
 - `!rps [choice]` - Play rock-paper-scissors against the bot with emoji responses
 - `!number [range]` - Generate random numbers with custom ranges (`1-100`, `50`)
+
+#### 🃏 Complete Poker Game System (17 Commands)
+- `!poker <ante> [max_players]` - Start new multi-player poker game (2-6 players)
+- `!solo <ante> [difficulty]` - Play solo Texas Hold'em against intelligent AI
+- `!join <ante>` - Join existing poker game in the channel
+- `!commit <number> <salt>` - Commit random number for cryptographic deck shuffling
+- `!reveal` - Reveal committed number to generate provably fair deck
+- `!start` - Start committed game after all players have joined
+- `!bet <amount>` - Place initial bet in current betting round
+- `!call` - Call current bet amount
+- `!check` - Check (stay in hand without betting when no bet to call)
+- `!fold` - Fold hand and exit current round
+- `!raise <amount>` - Raise current bet by specified amount
+- `!verify <game_id>` - Verify cryptographic fairness of completed game
+- `!games` - List all active poker games in the channel
+- `!hand` - Show your current poker hand (cards and strength)
+- `!chips` - Show current chip count and betting position
+- `!status` - Show detailed current game status and betting round
+- `!cards` - View your private cards in secure modal interface
 
 ### 📋 IRC Command System (8 Commands)
 
@@ -51,14 +70,27 @@ A decentralized IRC-like chat application built on the Nostr protocol, bringing 
 #### 💬 Communication Commands
 - `/msg [username|pubkey|npub] [message]` - Send private message with username resolution
 
-### 🔧 Advanced Bot Architecture
+### 🔧 Advanced Bot Architecture & Gaming System
 - **Modular Framework**: Extensible BaseBot class with plugin registration system
-- **4 Specialized Bots**: WeatherBot, GameBot, StatsBot, HelperBot with distinct capabilities
+- **5 Specialized Bots**: WeatherBot, GameBot, StatsBot, HelperBot, PokerBot with distinct capabilities
+- **Channel Segregation**: Bots isolated per channel with command deduplication system
+- **Enhanced Network Reliability**: Rate-limiting, proof-of-work, and retry mechanisms for Nostr publishing
 - **Command Registration**: Dynamic command discovery and registration system
 - **Error Handling**: Graceful error handling with user-friendly feedback messages
 - **Response Types**: Structured bot responses with metadata and rich formatting
 - **Caching System**: Smart caching for weather data and API responses
 - **Statistics Tracking**: Real-time tracking of bot usage and channel activity
+
+#### 🃏 Poker Game Features
+- **Texas Hold'em Implementation**: Complete poker game mechanics with betting rounds
+- **Multi-player Support**: 2-6 players per game with real-time action processing
+- **Solo AI Mode**: Play against intelligent AI opponent with strategic decision-making
+- **Cryptographic Fairness**: Commit-reveal scheme ensuring provably fair deck shuffling
+- **Game Verification**: Cryptographic verification of completed games for transparency
+- **Real-time Updates**: Live game state synchronization via Nostr protocol
+- **Complete Action Set**: All poker actions (bet, call, check, fold, raise) implemented
+- **Hand Evaluation**: Comprehensive poker hand ranking and winner determination
+- **Chip Management**: Virtual chip system with betting validation and pot management
 
 ### 🌐 Modern Social Media Features
 - **Feed System**: Timeline view of posts from followed users with threaded discussions

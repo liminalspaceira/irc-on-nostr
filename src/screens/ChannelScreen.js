@@ -63,11 +63,13 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
 
     loadChannelData();
     subscribeToChannel();
+    setupLocalBotResponseListener();
 
     return () => {
       if (subscriptionRef.current) {
         nostrService.unsubscribe(subscriptionRef.current);
       }
+      cleanupLocalBotResponseListener();
     };
   }, [channelId]);
 
@@ -144,6 +146,24 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
     );
   };
 
+  const setupLocalBotResponseListener = () => {
+    // Set up listener for local bot responses when relay publishing fails
+    if (typeof window !== 'undefined') {
+      window.nostrLocalBotResponse = (localMessage) => {
+        // Only process messages for this channel
+        if (localMessage.channelId === channelId) {
+          onNewMessage(localMessage);
+        }
+      };
+    }
+  };
+
+  const cleanupLocalBotResponseListener = () => {
+    if (typeof window !== 'undefined') {
+      window.nostrLocalBotResponse = null;
+    }
+  };
+
   const scrollToBottom = () => {
     // Web-specific scroll to bottom
     setTimeout(() => {
@@ -154,27 +174,60 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
   };
 
   const onNewMessage = (message) => {
+    console.log('📨 onNewMessage called with:', {
+      id: message.id,
+      content: message.content.substring(0, 100) + '...',
+      author: message.author,
+      type: message.type,
+      tags: message.tags
+    });
+
     setMessages(prev => {
       const exists = prev.find(m => m.id === message.id);
-      if (exists) return prev;
+      if (exists) {
+        console.log('⚠️ Duplicate message, ignoring:', message.id);
+        return prev;
+      }
       
-      // Check if this is a bot response by looking at message tags
+      // Check if this is a bot response by looking at message tags OR JSON content
       let processedMessage = { ...message };
+      let isBotResponse = false;
+      
+      // Method 1: Check for message_type tag
       if (message.tags) {
         const messageTypeTag = message.tags.find(tag => tag[0] === 'message_type');
         if (messageTypeTag && messageTypeTag[1] === MESSAGE_TYPES.BOT_RESPONSE) {
-          try {
-            // Parse bot response JSON content
-            const botResponse = JSON.parse(message.content);
-            processedMessage = {
-              ...message,
-              content: botResponse.content || message.content,
-              type: MESSAGE_TYPES.BOT_RESPONSE,
-              data: botResponse.data
-            };
-          } catch (error) {
-            console.error('Error parsing bot response:', error);
+          isBotResponse = true;
+        }
+      }
+      
+      // Method 2: Check if content looks like bot response JSON (fallback)
+      if (!isBotResponse && message.content.startsWith('{"content":') && message.content.includes('"type":')) {
+        try {
+          const parsed = JSON.parse(message.content);
+          if (parsed.content && parsed.type && parsed.timestamp) {
+            isBotResponse = true;
+            console.log('🤖 Detected bot response by JSON structure');
           }
+        } catch (e) {
+          // Not JSON, ignore
+        }
+      }
+      
+      if (isBotResponse) {
+        console.log('🤖 Processing bot response message:', message.id);
+        try {
+          // Parse bot response JSON content
+          const botResponse = JSON.parse(message.content);
+          processedMessage = {
+            ...message,
+            content: botResponse.content || message.content,
+            type: MESSAGE_TYPES.BOT_RESPONSE,
+            data: botResponse.data
+          };
+          console.log('✅ Bot response parsed successfully:', botResponse.content.substring(0, 50) + '...');
+        } catch (error) {
+          console.error('❌ Error parsing bot response:', error);
         }
       }
       
@@ -340,11 +393,32 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
         return;
       }
 
-      // Check if it's a bot command
+      // Check if it's a bot command - but send to chat first for visibility
       const botCommand = nostrUtils.parseBotCommandFromMessage(trimmedText);
       if (botCommand) {
         console.log('Bot command detected:', botCommand);
-        await handleBotCommand(botCommand);
+        try {
+          // First try to send the command as a regular message so everyone can see it
+          await nostrService.sendChannelMessage(channelId, trimmedText);
+          console.log('✅ Bot command sent to Nostr, framework will pick it up');
+        } catch (relayError) {
+          console.warn('⚠️ Relay publishing failed for bot command, processing locally:', relayError.message);
+          
+          // Show the user's command locally since relay failed
+          const userCommandMessage = {
+            id: `local_user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            content: trimmedText,
+            author: nostrService.publicKey,
+            channelId: channelId,
+            timestamp: Math.floor(Date.now() / 1000),
+            type: MESSAGE_TYPES.TEXT,
+            isLocal: true
+          };
+          onNewMessage(userCommandMessage);
+          
+          // Process bot command locally when relay publishing fails
+          await handleBotCommandLocally(botCommand);
+        }
         setInputText('');
         return;
       }
@@ -359,60 +433,56 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
     }
   };
 
-  const handleBotCommand = async (botCommand) => {
+  // Handle bot commands locally when Nostr relay publishing fails
+  const handleBotCommandLocally = async (botCommand) => {
     try {
-      console.log('Executing bot command:', botCommand);
+      console.log('🤖 Processing bot command locally:', botCommand);
       
-      // Check if bot service is ready
-      if (!botService.isReady()) {
-        console.error('Bot service not ready');
-        const errorMessage = {
-          id: Date.now().toString() + '_bot_error',
-          content: '🤖 Bot service is not available. Please try again later.',
-          author: 'system',
-          channelId: channelId,
-          timestamp: Math.floor(Date.now() / 1000),
-          type: MESSAGE_TYPES.BOT_RESPONSE
-        };
-        onNewMessage(errorMessage);
-        return;
-      }
+      // Create context similar to what the bot framework expects
+      const context = {
+        channelId: channelId,
+        userId: nostrService.publicKey,
+        timestamp: Math.floor(Date.now() / 1000)
+      };
 
-      // Execute the command using bot service
+      // Use the bot service to execute the command directly
       const response = await botService.sendBotCommand(
         channelId, 
         botCommand.command, 
         botCommand.args, 
-        nostrService.publicKey || 'anonymous'
+        context.userId
       );
 
+      // If we get a response, display it locally
       if (response) {
-        // Create bot response message
-        const botMessage = {
-          id: Date.now().toString() + '_bot_response',
+        const localBotMessage = {
+          id: `local_bot_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
           content: response.content || response,
           author: 'bot',
           channelId: channelId,
-          timestamp: Math.floor(Date.now() / 1000),
+          timestamp: context.timestamp,
           type: MESSAGE_TYPES.BOT_RESPONSE,
-          data: response.data
+          data: response.data,
+          isLocal: true
         };
-        
-        onNewMessage(botMessage);
-      }
 
+        // Add the bot response to the chat
+        onNewMessage(localBotMessage);
+        console.log('✅ Local bot command processed successfully');
+      }
     } catch (error) {
-      console.error('Error executing bot command:', error);
+      console.error('❌ Error processing bot command locally:', error);
       
+      // Show error message in chat
       const errorMessage = {
-        id: Date.now().toString() + '_bot_error',
-        content: `🤖 ❌ Error: ${error.message || 'Bot command failed'}`,
+        id: `local_error_${Date.now()}`,
+        content: `❌ Bot error: ${error.message}`,
         author: 'system',
         channelId: channelId,
         timestamp: Math.floor(Date.now() / 1000),
-        type: MESSAGE_TYPES.BOT_RESPONSE
+        type: MESSAGE_TYPES.SYSTEM,
+        isLocal: true
       };
-      
       onNewMessage(errorMessage);
     }
   };

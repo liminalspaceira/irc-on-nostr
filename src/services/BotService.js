@@ -3,6 +3,7 @@ import StatsBot from '../bots/StatsBot';
 import WeatherBot from '../bots/WeatherBot';
 import GameBot from '../bots/GameBot';
 import HelperBot from '../bots/HelperBot';
+import { PokerBot } from '../bots/PokerBot';
 
 class BotService {
   constructor() {
@@ -19,17 +20,29 @@ class BotService {
     try {
       console.log('Initializing BotService...');
       
+      // Clear any existing bots from previous initializations
+      await botFramework.stop();
+      botFramework.bots.clear();
+      botFramework.commands.clear();
+      
+      // Update global session ID to invalidate old poker bot instances
+      if (typeof window !== 'undefined') {
+        window.POKER_SESSION_ID = Date.now();
+      }
+      
       // Create bot instances
       this.bots.statsBot = new StatsBot();
       this.bots.weatherBot = new WeatherBot();
       this.bots.gameBot = new GameBot();
       this.bots.helperBot = new HelperBot();
+      this.bots.pokerBot = new PokerBot();
       
       // Register bots with the framework
       botFramework.registerBot(this.bots.statsBot);
       botFramework.registerBot(this.bots.weatherBot);
       botFramework.registerBot(this.bots.gameBot);
       botFramework.registerBot(this.bots.helperBot);
+      botFramework.registerBot(this.bots.pokerBot);
       
       // Start the bot framework
       await botFramework.start();
@@ -76,13 +89,14 @@ class BotService {
     }
   }
 
-  // Get framework status
-  getStatus() {
+  // Get framework status (optionally for a specific channel)
+  getStatus(channelId = null) {
     return {
       initialized: this.initialized,
       frameworkStats: this.initialized ? botFramework.getStats() : null,
-      registeredBots: this.initialized ? botFramework.getBots() : [],
-      availableCommands: this.initialized ? botFramework.getCommands() : []
+      registeredBots: this.initialized ? botFramework.getBots(channelId) : [],
+      availableCommands: this.initialized ? botFramework.getCommands(channelId) : [],
+      channelId: channelId
     };
   }
 
@@ -103,22 +117,60 @@ class BotService {
     return this.initialized && botFramework.isRunning;
   }
 
-  // Get help information
-  getHelpInfo() {
+  // Get help information (optionally for a specific channel)
+  getHelpInfo(channelId = null) {
     if (!this.initialized) {
       return 'Bot system not initialized';
     }
 
-    const commands = botFramework.getCommands();
+    const commands = botFramework.getCommands(channelId);
     const commandList = commands.map(cmd => `!${cmd.command} - ${cmd.description}`);
     
+    const channelText = channelId ? ` (Channel: ${channelId})` : '';
+    
     return [
-      '🤖 Available Bot Commands:',
+      `🤖 Available Bot Commands${channelText}:`,
       '',
       ...commandList,
       '',
       'Use !help for detailed information'
     ].join('\n');
+  }
+
+  // Add bot to specific channel
+  addBotToChannel(botId, channelId) {
+    if (!this.initialized) {
+      throw new Error('Bot system not initialized');
+    }
+    
+    return botFramework.addBotToChannel(botId, channelId);
+  }
+
+  // Remove bot from specific channel
+  removeBotFromChannel(botId, channelId) {
+    if (!this.initialized) {
+      throw new Error('Bot system not initialized');
+    }
+    
+    return botFramework.removeBotFromChannel(botId, channelId);
+  }
+
+  // Check if bot is active in channel
+  isBotActiveInChannel(botId, channelId) {
+    if (!this.initialized) {
+      return false;
+    }
+    
+    return botFramework.isBotActiveInChannel(botId, channelId);
+  }
+
+  // Get bots active in a specific channel
+  getChannelBots(channelId) {
+    if (!this.initialized) {
+      return [];
+    }
+    
+    return botFramework.getBots(channelId);
   }
 
   // Manually send bot command (for testing)

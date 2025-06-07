@@ -178,7 +178,8 @@ export const BOT_RESPONSE_TYPES = {
   EMBED: 'embed',
   IMAGE: 'image',
   LIST: 'list',
-  ERROR: 'error'
+  ERROR: 'error',
+  MODAL: 'modal'
 };
 
 // Regular Expressions

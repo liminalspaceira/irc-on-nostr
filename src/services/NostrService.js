@@ -8,6 +8,53 @@ import {
   ERROR_MESSAGES 
 } from '../utils/constants';
 
+// Simple proof-of-work calculation for Nostr events
+function calculateProofOfWork(event, targetDifficulty = 16) {
+  let nonce = 0;
+  const baseEvent = { ...event };
+  
+  while (true) {
+    // Add nonce tag
+    baseEvent.tags = (event.tags || []).filter(tag => tag[0] !== 'nonce');
+    baseEvent.tags.push(['nonce', nonce.toString(), targetDifficulty.toString()]);
+    
+    // Calculate event ID (hash)
+    const eventString = JSON.stringify([
+      0,
+      baseEvent.pubkey,
+      baseEvent.created_at,
+      baseEvent.kind,
+      baseEvent.tags,
+      baseEvent.content
+    ]);
+    
+    // Simple hash calculation (this is a simplified version)
+    let hash = 0;
+    for (let i = 0; i < eventString.length; i++) {
+      const char = eventString.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32bit integer
+    }
+    
+    // Convert to hex and check leading zeros
+    const hexHash = Math.abs(hash).toString(16).padStart(8, '0');
+    const leadingZeros = hexHash.match(/^0*/)[0].length * 4; // Each hex digit = 4 bits
+    
+    if (leadingZeros >= targetDifficulty) {
+      console.log(`⛏️ Proof of work found: nonce=${nonce}, difficulty=${leadingZeros} bits`);
+      return { ...baseEvent, tags: baseEvent.tags };
+    }
+    
+    nonce++;
+    
+    // Prevent infinite loops
+    if (nonce > 100000) {
+      console.log('⚠️ Proof of work calculation timeout, using original event');
+      return event;
+    }
+  }
+}
+
 // Browser WebSocket polyfill
 if (typeof WebSocket === 'undefined') {
   global.WebSocket = require('ws');
@@ -23,6 +70,12 @@ class NostrService {
     this.privateKey = null;
     this.publicKey = null;
     this.connectedRelays = new Set();
+    
+    // Rate limiting and retry management
+    this.publishDelay = 3000; // 3 seconds between publishes (reduced from 5s for better responsiveness)
+    this.maxRetries = 8; // Even more retries for better success rate  
+    this.baseRetryDelay = 1500; // 1.5 second base delay
+    this.lastGlobalPublish = 0; // timestamp of last publish
   }
 
   async initialize() {
@@ -108,44 +161,80 @@ class NostrService {
     }
   }
 
-  async publishEvent(event) {
+  async publishEvent(event, retryCount = 0, options = {}) {
     try {
       if (!this.privateKey) {
         throw new Error(ERROR_MESSAGES.NO_PRIVATE_KEY);
       }
       
       // Create the event with proper structure
-      const eventTemplate = {
+      let eventTemplate = {
         kind: event.kind,
         created_at: event.created_at || Math.floor(Date.now() / 1000),
         tags: event.tags || [],
         content: event.content
       };
       
-      // Debug: check private key format
-      console.log('Private key type:', typeof this.privateKey);
-      console.log('Private key length:', this.privateKey?.length);
-      console.log('Private key sample:', this.privateKey?.substring(0, 10) + '...');
+      // Apply proof-of-work if requested (for bot messages that need higher delivery success)
+      if (options.useProofOfWork) {
+        console.log('⛏️ Calculating proof of work for better delivery...');
+        eventTemplate = calculateProofOfWork(eventTemplate, options.proofOfWorkDifficulty || 16);
+      }
       
       // Convert hex string to Uint8Array for nostr-tools
       const privateKeyBytes = new Uint8Array(
         this.privateKey.match(/.{1,2}/g).map(byte => parseInt(byte, 16))
       );
       
-      console.log('Private key bytes length:', privateKeyBytes.length);
-      
       const finalEvent = finalizeEvent(eventTemplate, privateKeyBytes);
       
-      // Publish using SimplePool
-      const pubs = this.pool.publish(Array.from(this.connectedRelays), finalEvent);
+      // Apply rate limiting delay if requested
+      if (retryCount === 0 && options.useRateLimit !== false) {
+        await this.applyGlobalRateLimit();
+      }
       
-      console.log('Published event:', finalEvent);
-      return finalEvent;
+      // Publish using SimplePool (simple approach)
+      console.log(`📡 Publishing event to ${this.connectedRelays.size} relays (attempt ${retryCount + 1}/${this.maxRetries + 1})`);
+      
+      try {
+        const pubs = this.pool.publish(Array.from(this.connectedRelays), finalEvent);
+        console.log('✅ Event published to relays');
+        return finalEvent;
+      } catch (publishError) {
+        console.log(`❌ Publish failed:`, publishError.message);
+        
+        // Retry with exponential backoff if we haven't exceeded max retries
+        if (retryCount < this.maxRetries) {
+          const delay = this.baseRetryDelay * Math.pow(2, retryCount);
+          console.log(`⏳ Retrying in ${delay}ms...`);
+          
+          await new Promise(resolve => setTimeout(resolve, delay));
+          return await this.publishEvent(event, retryCount + 1, options);
+        }
+        
+        throw publishError;
+      }
+      
     } catch (error) {
       console.error('Error publishing event:', error);
       throw error;
     }
   }
+
+  async applyGlobalRateLimit() {
+    const now = Date.now();
+    const lastPublish = this.lastGlobalPublish || 0;
+    const timeSinceLastPublish = now - lastPublish;
+    
+    if (timeSinceLastPublish < this.publishDelay) {
+      const delay = this.publishDelay - timeSinceLastPublish;
+      console.log(`⏱️ Rate limiting: waiting ${delay}ms`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+    
+    this.lastGlobalPublish = now;
+  }
+
 
   subscribe(filters, onEvent, onEose = null) {
     try {
@@ -235,7 +324,15 @@ class NostrService {
         event.tags.push(['message_type', messageType]);
       }
       
-      return await this.publishEvent(event);
+      // Use enhanced publishing with proof-of-work for bot responses
+      const publishOptions = {};
+      if (messageType === 'bot_response') {
+        publishOptions.useProofOfWork = true;
+        publishOptions.proofOfWorkDifficulty = 16; // Moderate difficulty for better delivery
+        console.log('🤖 Using enhanced publishing for bot response');
+      }
+      
+      return await this.publishEvent(event, 0, publishOptions);
     } catch (error) {
       console.error('Error sending channel message:', error);
       throw error;
