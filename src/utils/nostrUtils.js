@@ -509,6 +509,130 @@ export class NostrUtils {
       return false;
     }
   }
+
+  // Parse nostr: references in content
+  parseNostrReferences(content) {
+    if (!content) return [];
+    
+    const nostrRegex = /nostr:(npub1[a-z0-9]{58}|note1[a-z0-9]{58}|nevent1[a-z0-9]+)/gi;
+    const references = [];
+    let match;
+    
+    while ((match = nostrRegex.exec(content)) !== null) {
+      const fullMatch = match[0]; // "nostr:npub1..."
+      const encodedPart = match[1]; // "npub1..."
+      
+      try {
+        const decoded = nip19.decode(encodedPart);
+        references.push({
+          originalText: fullMatch,
+          encodedPart: encodedPart,
+          type: decoded.type,
+          data: decoded.data,
+          startIndex: match.index,
+          endIndex: match.index + fullMatch.length
+        });
+      } catch (error) {
+        console.warn('Failed to decode nostr reference:', encodedPart, error);
+      }
+    }
+    
+    return references;
+  }
+
+  // Replace nostr: references with user-friendly text
+  replaceNostrReferences(content, userProfiles = new Map(), onReferencePress = null) {
+    const references = this.parseNostrReferences(content);
+    if (references.length === 0) return [{ type: 'text', content }];
+    
+    const parts = [];
+    let lastIndex = 0;
+    
+    references.forEach(ref => {
+      // Add text before this reference
+      if (ref.startIndex > lastIndex) {
+        const beforeText = content.substring(lastIndex, ref.startIndex);
+        if (beforeText) {
+          parts.push({ type: 'text', content: beforeText });
+        }
+      }
+      
+      // Add the reference as a special part
+      let displayText = '';
+      let clickData = null;
+      
+      switch (ref.type) {
+        case 'npub':
+          // Look up user profile
+          const profile = userProfiles.get(ref.data);
+          if (profile) {
+            displayText = `@${profile.name || profile.display_name || 'Unknown'}`;
+          } else {
+            displayText = `@${ref.data.substring(0, 8)}...`;
+          }
+          clickData = { type: 'user', pubkey: ref.data, profile };
+          break;
+          
+        case 'note':
+          displayText = '📝 mentioned a post';
+          clickData = { type: 'note', noteId: ref.data };
+          break;
+          
+        case 'nevent':
+          displayText = '📝 mentioned a post';
+          clickData = { type: 'event', eventData: ref.data };
+          break;
+          
+        default:
+          displayText = ref.originalText;
+      }
+      
+      parts.push({
+        type: 'reference',
+        content: displayText,
+        originalText: ref.originalText,
+        referenceType: ref.type,
+        data: ref.data,
+        clickData,
+        onPress: onReferencePress
+      });
+      
+      lastIndex = ref.endIndex;
+    });
+    
+    // Add remaining text after last reference
+    if (lastIndex < content.length) {
+      const remainingText = content.substring(lastIndex);
+      if (remainingText) {
+        parts.push({ type: 'text', content: remainingText });
+      }
+    }
+    
+    return parts;
+  }
+
+  // Decode various nostr reference types
+  decodeNostrReference(reference) {
+    try {
+      if (reference.startsWith('nostr:')) {
+        reference = reference.substring(6); // Remove "nostr:" prefix
+      }
+      
+      const decoded = nip19.decode(reference);
+      return {
+        type: decoded.type,
+        data: decoded.data,
+        success: true
+      };
+    } catch (error) {
+      return {
+        type: null,
+        data: null,
+        success: false,
+        error: error.message
+      };
+    }
+  }
 }
 
 export const nostrUtils = new NostrUtils();

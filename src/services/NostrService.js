@@ -601,53 +601,37 @@ class NostrService {
     }
   }
 
-  async getUserPosts(userPubkey, limit = 50) {
+  async getUserPosts(userPubkey, limit = 500) {
     try {
-      console.log('📝 Querying posts for user:', userPubkey.substring(0, 8) + '...');
+      console.log('📝 Querying ALL posts for user:', userPubkey.substring(0, 8) + '...');
       
-      return new Promise((resolve) => {
-        const posts = [];
-        let timeoutId;
-        
-        const filters = {
-          kinds: [EVENT_KINDS.TEXT_NOTE], // Kind 1 - text notes
-          authors: [userPubkey],
-          limit: limit
-        };
-        
-        console.log('User posts filters:', filters);
-        
-        const subscription = this.pool.subscribeMany(
-          Array.from(this.connectedRelays),
-          [filters],
-          {
-            onevent: (event) => {
-              // Only include regular text notes, not replies
-              const isReply = event.tags && event.tags.some(tag => tag[0] === 'e');
-              if (!isReply) {
-                const exists = posts.find(p => p.id === event.id);
-                if (!exists) {
-                  posts.push(event);
-                  console.log('📄 Found post from user');
-                }
-              }
-            },
-            oneose: () => {
-              console.log('📬 End of user posts query, found', posts.length, 'posts');
-              clearTimeout(timeoutId);
-              subscription.close();
-              resolve(posts);
-            }
-          }
-        );
-        
-        // Timeout after 10 seconds
-        timeoutId = setTimeout(() => {
-          console.log('⏰ User posts query timeout, returning', posts.length, 'posts');
-          subscription.close();
-          resolve(posts);
-        }, 10000);
-      });
+      const filters = {
+        kinds: [EVENT_KINDS.TEXT_NOTE], // Kind 1 - text notes
+        authors: [userPubkey],
+        limit: limit
+        // Removed 'since' filter to get ALL historical posts
+      };
+      
+      console.log('User posts filters:', filters);
+      
+      // Use querySync for better reliability in getting historical posts
+      const posts = await this.pool.querySync(Array.from(this.connectedRelays), filters);
+      
+      console.log('📬 Found', posts.length, 'total posts/replies for user');
+      
+      // Remove duplicates (just in case)
+      const uniquePosts = [];
+      const seenIds = new Set();
+      
+      for (const post of posts) {
+        if (!seenIds.has(post.id)) {
+          seenIds.add(post.id);
+          uniquePosts.push(post);
+        }
+      }
+      
+      console.log('📊 After deduplication:', uniquePosts.length, 'unique posts');
+      return uniquePosts;
     } catch (error) {
       console.error('Error querying user posts:', error);
       return [];
@@ -830,6 +814,35 @@ class NostrService {
     }
   }
 
+  // Read status tracking methods
+  async getLastReadTimestamp(contactPubkey) {
+    try {
+      const timestamps = await AsyncStorage.getItem(STORAGE_KEYS.DM_LAST_READ_TIMESTAMPS);
+      const readTimestamps = timestamps ? JSON.parse(timestamps) : {};
+      return readTimestamps[contactPubkey] || 0;
+    } catch (error) {
+      console.error('Error getting last read timestamp:', error);
+      return 0;
+    }
+  }
+
+  async setLastReadTimestamp(contactPubkey, timestamp) {
+    try {
+      const timestamps = await AsyncStorage.getItem(STORAGE_KEYS.DM_LAST_READ_TIMESTAMPS);
+      const readTimestamps = timestamps ? JSON.parse(timestamps) : {};
+      readTimestamps[contactPubkey] = timestamp;
+      await AsyncStorage.setItem(STORAGE_KEYS.DM_LAST_READ_TIMESTAMPS, JSON.stringify(readTimestamps));
+    } catch (error) {
+      console.error('Error setting last read timestamp:', error);
+    }
+  }
+
+  async markConversationAsRead(contactPubkey) {
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    await this.setLastReadTimestamp(contactPubkey, currentTimestamp);
+    console.log(`✅ Marked conversation as read: ${contactPubkey.substring(0, 8)}...`);
+  }
+
   // Private messaging methods (NIP-04)
   async sendPrivateMessage(recipientPubkey, content) {
     if (!this.privateKey) {
@@ -934,14 +947,20 @@ class NostrService {
       }
 
       // Sort messages in each conversation and calculate unread count
-      const conversationsList = Array.from(conversations.values()).map(conv => {
+      const conversationsList = [];
+      for (const conv of conversations.values()) {
         conv.messages.sort((a, b) => a.timestamp - b.timestamp);
         
-        // For now, mark all messages from others as unread (in a real app, you'd track read status)
-        conv.unreadCount = conv.messages.filter(msg => !msg.isFromMe).length;
+        // Get last read timestamp for this conversation
+        const lastReadTimestamp = await this.getLastReadTimestamp(conv.pubkey);
         
-        return conv;
-      });
+        // Count messages from others that are newer than last read timestamp
+        conv.unreadCount = conv.messages.filter(msg => 
+          !msg.isFromMe && msg.timestamp > lastReadTimestamp
+        ).length;
+        
+        conversationsList.push(conv);
+      }
 
       // Sort conversations by last message timestamp
       conversationsList.sort((a, b) => {
@@ -1238,6 +1257,188 @@ class NostrService {
     } catch (error) {
       console.error('Error getting feed posts:', error);
       return [];
+    }
+  }
+
+  // Real-time subscription for feed posts
+  subscribeToFeedPosts(followingPubkeys, onNewPost) {
+    if (!followingPubkeys || followingPubkeys.length === 0) {
+      console.log('No following pubkeys provided for feed subscription');
+      return null;
+    }
+
+    const subscriptionId = 'feed_posts';
+    
+    console.log(`🔄 Subscribing to feed posts from ${followingPubkeys.length} users...`);
+    
+    const subscription = this.pool.subscribeMany(Array.from(this.connectedRelays), [
+      {
+        kinds: [1], // Text notes
+        authors: followingPubkeys,
+        since: Math.floor(Date.now() / 1000) // Only new posts from now
+      }
+    ], {
+      onevent: (event) => {
+        console.log(`📝 New feed post received from ${event.pubkey.substring(0, 8)}...`);
+        
+        const newPost = {
+          id: event.id,
+          content: event.content,
+          pubkey: event.pubkey,
+          created_at: event.created_at,
+          tags: event.tags || [],
+          sig: event.sig
+        };
+        
+        onNewPost(newPost);
+      },
+      oneose: () => {
+        console.log('✅ Feed subscription established');
+      }
+    });
+
+    this.subscriptions.set(subscriptionId, subscription);
+    return subscriptionId;
+  }
+
+  // General subscription for all private messages (for conversation list updates)
+  subscribeToAllPrivateMessages(onNewMessage) {
+    if (!this.publicKey) {
+      console.error('No public key available for DM subscription');
+      return null;
+    }
+
+    const subscriptionId = 'all_private_messages';
+    
+    console.log(`🔄 Subscribing to all private messages for user ${this.publicKey.substring(0, 8)}...`);
+    
+    const subscription = this.pool.subscribeMany(Array.from(this.connectedRelays), [
+      {
+        kinds: [4], // Encrypted direct messages
+        '#p': [this.publicKey], // Messages sent to me
+        since: Math.floor(Date.now() / 1000) // Only new messages from now
+      }
+    ], {
+      onevent: async (event) => {
+        try {
+          console.log(`💬 New private message received from ${event.pubkey.substring(0, 8)}...`);
+          
+          // Decrypt the message
+          const decryptedContent = await nip04.decrypt(this.privateKey, event.pubkey, event.content);
+          
+          const newMessage = {
+            id: event.id,
+            content: decryptedContent,
+            author: event.pubkey,
+            recipient: this.publicKey,
+            timestamp: event.created_at,
+            isFromMe: false
+          };
+          
+          onNewMessage(newMessage, event.pubkey);
+        } catch (decryptError) {
+          console.warn('Failed to decrypt new private message:', decryptError);
+        }
+      },
+      oneose: () => {
+        console.log('✅ Private messages subscription established');
+      }
+    });
+
+    this.subscriptions.set(subscriptionId, subscription);
+    return subscriptionId;
+  }
+
+  // Fetch posts by note IDs or event IDs for nostr references
+  async getReferencedPosts(references) {
+    if (!references || references.length === 0) {
+      return new Map();
+    }
+
+    try {
+      const eventIds = [];
+      references.forEach(ref => {
+        if (ref.type === 'note') {
+          // note1... is a bech32 encoded event ID
+          eventIds.push(ref.data);
+        } else if (ref.type === 'nevent') {
+          // nevent contains event ID and optionally relay info
+          if (ref.data && ref.data.id) {
+            eventIds.push(ref.data.id);
+          }
+        }
+      });
+
+      if (eventIds.length === 0) {
+        return new Map();
+      }
+
+      console.log(`🔍 Fetching ${eventIds.length} referenced posts...`);
+      
+      // Query for the referenced events
+      const referencedEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [1], // Text notes
+        ids: eventIds,
+        limit: eventIds.length * 2 // Allow some buffer
+      });
+
+      // Process and map the results
+      const referencedPosts = new Map();
+      referencedEvents.forEach(event => {
+        const post = {
+          id: event.id,
+          content: event.content,
+          pubkey: event.pubkey,
+          created_at: event.created_at,
+          tags: event.tags || [],
+          sig: event.sig
+        };
+        referencedPosts.set(event.id, post);
+      });
+
+      console.log(`✅ Retrieved ${referencedPosts.size} referenced posts`);
+      return referencedPosts;
+    } catch (error) {
+      console.error('❌ Error fetching referenced posts:', error);
+      return new Map();
+    }
+  }
+
+  // Fetch original posts for reply context
+  async getOriginalPosts(postIds) {
+    if (!postIds || postIds.length === 0) {
+      return new Map();
+    }
+
+    try {
+      console.log(`🔍 Fetching ${postIds.length} original posts for reply context...`);
+      
+      // Query for the original posts by their IDs
+      const originalEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [1], // Text notes
+        ids: postIds,
+        limit: postIds.length * 2 // Allow some buffer
+      });
+
+      // Process and map the results
+      const originalPosts = new Map();
+      originalEvents.forEach(event => {
+        const post = {
+          id: event.id,
+          content: event.content,
+          pubkey: event.pubkey,
+          created_at: event.created_at,
+          tags: event.tags || [],
+          sig: event.sig
+        };
+        originalPosts.set(event.id, post);
+      });
+
+      console.log(`✅ Retrieved ${originalPosts.size} original posts`);
+      return originalPosts;
+    } catch (error) {
+      console.error('❌ Error fetching original posts:', error);
+      return new Map();
     }
   }
 
@@ -1560,6 +1761,54 @@ class NostrService {
       return new Set();
     }
   }
+
+  async getFollowing(userPubkey) {
+    try {
+      // Query for the user's contact list (kind 3)
+      const contactEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [3],
+        authors: [userPubkey],
+        limit: 1
+      });
+
+      if (contactEvents.length === 0) {
+        return [];
+      }
+
+      // Get the most recent contact list
+      const latestContactEvent = contactEvents.sort((a, b) => b.created_at - a.created_at)[0];
+      
+      // Extract pubkeys from tags
+      const following = latestContactEvent.tags
+        .filter(tag => tag[0] === 'p' && tag[1])
+        .map(tag => tag[1]);
+
+      return following;
+    } catch (error) {
+      console.error('Error getting following list:', error);
+      return [];
+    }
+  }
+
+  async getFollowers(userPubkey) {
+    try {
+      // Query for contact lists that include this user (kind 3)
+      const contactEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [3],
+        '#p': [userPubkey],
+        limit: 1000
+      });
+
+      // Extract unique authors (followers)
+      const followers = [...new Set(contactEvents.map(event => event.pubkey))];
+      
+      return followers;
+    } catch (error) {
+      console.error('Error getting followers list:', error);
+      return [];
+    }
+  }
+
 
   disconnect() {
     try {

@@ -16,6 +16,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nostrService } from '../services/NostrService';
+import { nostrUtils } from '../utils/nostrUtils';
 import { STORAGE_KEYS, THEMES } from '../utils/constants';
 
 const { width: screenWidth } = Dimensions.get('window');
@@ -27,9 +28,8 @@ const FeedScreen = ({ navigation, theme = THEMES.DARK }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [following, setFollowing] = useState([]);
-  const [expandedThreads, setExpandedThreads] = useState(new Set());
-  const [expandedFollowedReplies, setExpandedFollowedReplies] = useState(new Set());
-  const [expandedUnfollowedReplies, setExpandedUnfollowedReplies] = useState(new Set());
+  const [originalPosts, setOriginalPosts] = useState(new Map());
+  const [referencedPosts, setReferencedPosts] = useState(new Map());
   const [likedPosts, setLikedPosts] = useState(new Set());
   const [repostedPosts, setRepostedPosts] = useState(new Set());
   const [actionInProgress, setActionInProgress] = useState(new Set());
@@ -47,10 +47,151 @@ const FeedScreen = ({ navigation, theme = THEMES.DARK }) => {
     replies: new Map()
   });
 
+  const [feedSubscriptionId, setFeedSubscriptionId] = useState(null);
+
   useEffect(() => {
     loadFeed();
     loadUserInteractions();
+    setupFeedSubscription();
+
+    return () => {
+      // Cleanup subscription when component unmounts
+      if (feedSubscriptionId) {
+        nostrService.unsubscribe(feedSubscriptionId);
+      }
+    };
   }, []);
+
+  const setupFeedSubscription = async () => {
+    try {
+      // Get current following list for subscription
+      const storedPublicKey = await AsyncStorage.getItem(STORAGE_KEYS.PUBLIC_KEY);
+      if (!storedPublicKey) return;
+
+      const contacts = await nostrService.getUserContacts(storedPublicKey);
+      if (contacts.length > 0) {
+        // Subscribe to new posts from followed users
+        const subId = nostrService.subscribeToFeedPosts(contacts, onNewFeedPost);
+        setFeedSubscriptionId(subId);
+      }
+    } catch (error) {
+      console.error('Failed to setup feed subscription:', error);
+    }
+  };
+
+  const onNewFeedPost = async (newPost) => {
+    console.log('📝 New feed post received:', newPost.id);
+    
+    // Add the new post to the beginning of the posts array
+    setPosts(prev => {
+      const exists = prev.find(post => post.id === newPost.id);
+      if (exists) return prev;
+      
+      const updated = [newPost, ...prev].sort((a, b) => b.created_at - a.created_at);
+      return updated;
+    });
+
+    // If this is a reply, fetch the original post for context
+    const replyToId = getReplyToId(newPost);
+    if (replyToId && !originalPosts.has(replyToId)) {
+      try {
+        const originalPostsMap = await nostrService.getOriginalPosts([replyToId]);
+        if (originalPostsMap.size > 0) {
+          setOriginalPosts(prev => new Map([...prev, ...originalPostsMap]));
+          
+          // Load profile for original post author
+          const originalPost = originalPostsMap.get(replyToId);
+          if (originalPost && !userProfiles.has(originalPost.pubkey)) {
+            const profile = await nostrService.getUserProfile(originalPost.pubkey);
+            if (profile) {
+              setUserProfiles(prev => new Map(prev).set(originalPost.pubkey, profile));
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Failed to load original post for new reply:', error);
+      }
+    }
+
+    // Update threads structure
+    setThreads(prev => {
+      const newThreads = new Map(prev);
+      
+      if (replyToId && newThreads.has(replyToId)) {
+        // This is a reply to an existing thread
+        const thread = newThreads.get(replyToId);
+        const isFollowed = following.includes(newPost.pubkey);
+        
+        if (isFollowed) {
+          thread.followedReplies.push(newPost);
+        } else {
+          thread.unfollowedReplies.push(newPost);
+        }
+      } else {
+        // This is a new original post or reply creating new thread
+        newThreads.set(newPost.id, {
+          original: newPost,
+          followedReplies: [],
+          unfollowedReplies: []
+        });
+      }
+      
+      return newThreads;
+    });
+
+    // Load profile for the new post author if we don't have it
+    if (!userProfiles.has(newPost.pubkey)) {
+      try {
+        const profile = await nostrService.getUserProfile(newPost.pubkey);
+        if (profile) {
+          setUserProfiles(prev => new Map(prev).set(newPost.pubkey, profile));
+        }
+      } catch (error) {
+        console.error('Failed to load profile for new post author:', error);
+      }
+    }
+
+    // Handle nostr references in real-time posts
+    const references = nostrUtils.parseNostrReferences(newPost.content);
+    if (references.length > 0) {
+      // Load profiles for mentioned users
+      references.forEach(async (ref) => {
+        if (ref.type === 'npub' && !userProfiles.has(ref.data)) {
+          try {
+            const profile = await nostrService.getUserProfile(ref.data);
+            if (profile) {
+              setUserProfiles(prev => new Map(prev).set(ref.data, profile));
+            }
+          } catch (error) {
+            console.error('Failed to load profile for referenced user:', error);
+          }
+        }
+      });
+
+      // Load referenced posts
+      const postReferences = references.filter(ref => ref.type === 'note' || ref.type === 'nevent');
+      if (postReferences.length > 0) {
+        try {
+          const newReferencedPosts = await nostrService.getReferencedPosts(postReferences);
+          if (newReferencedPosts.size > 0) {
+            setReferencedPosts(prev => new Map([...prev, ...newReferencedPosts]));
+            
+            // Load profiles for referenced post authors
+            newReferencedPosts.forEach(async (refPost) => {
+              if (!userProfiles.has(refPost.pubkey)) {
+                const profile = await nostrService.getUserProfile(refPost.pubkey);
+                if (profile) {
+                  setUserProfiles(prev => new Map(prev).set(refPost.pubkey, profile));
+                }
+              }
+            });
+          }
+        } catch (error) {
+          console.error('Failed to load referenced posts for new post:', error);
+        }
+      }
+    }
+  };
 
   const loadUserInteractions = async () => {
     try {
@@ -123,6 +264,18 @@ const FeedScreen = ({ navigation, theme = THEMES.DARK }) => {
         const sortedPosts = feedPosts.sort((a, b) => b.created_at - a.created_at);
         setPosts(sortedPosts);
 
+        // Fetch original posts for replies to show context
+        console.log('🔗 Fetching original posts for reply context...');
+        const replyToIds = new Set();
+        feedPosts.forEach(post => {
+          if (post.tags) {
+            const eTag = post.tags.find(tag => tag[0] === 'e' && tag[1]);
+            if (eTag) {
+              replyToIds.add(eTag[1]);
+            }
+          }
+        });
+
         // Get profiles for all users mentioned in posts
         const allUserPubkeys = new Set();
         feedPosts.forEach(post => {
@@ -135,7 +288,48 @@ const FeedScreen = ({ navigation, theme = THEMES.DARK }) => {
               }
             });
           }
+          
+          // Add users mentioned in nostr references
+          const references = nostrUtils.parseNostrReferences(post.content);
+          references.forEach(ref => {
+            if (ref.type === 'npub') {
+              allUserPubkeys.add(ref.data);
+            }
+          });
         });
+
+        // Fetch original posts and add their authors to profile loading
+        if (replyToIds.size > 0) {
+          const originalPostsMap = await nostrService.getOriginalPosts(Array.from(replyToIds));
+          setOriginalPosts(originalPostsMap);
+          
+          // Add original post authors to profile loading
+          originalPostsMap.forEach(originalPost => {
+            allUserPubkeys.add(originalPost.pubkey);
+          });
+          
+          console.log(`✅ Loaded ${originalPostsMap.size} original posts for context`);
+        }
+
+        // Fetch referenced posts from nostr: references
+        console.log('🔗 Fetching referenced posts from nostr references...');
+        const allReferences = [];
+        feedPosts.forEach(post => {
+          const references = nostrUtils.parseNostrReferences(post.content);
+          allReferences.push(...references);
+        });
+
+        if (allReferences.length > 0) {
+          const referencedPostsMap = await nostrService.getReferencedPosts(allReferences);
+          setReferencedPosts(referencedPostsMap);
+          
+          // Add referenced post authors to profile loading
+          referencedPostsMap.forEach(refPost => {
+            allUserPubkeys.add(refPost.pubkey);
+          });
+          
+          console.log(`✅ Loaded ${referencedPostsMap.size} referenced posts`);
+        }
 
         const profiles = await nostrService.getMultipleUserProfiles(Array.from(allUserPubkeys));
         setUserProfiles(profiles);
@@ -237,6 +431,14 @@ const FeedScreen = ({ navigation, theme = THEMES.DARK }) => {
     return eTag ? eTag[1] : null;
   };
 
+  const isReply = (post) => {
+    return getReplyToId(post) !== null;
+  };
+
+  const getOriginalPost = (replyToId) => {
+    return originalPosts.get(replyToId);
+  };
+
   const extractImages = (content) => {
     if (!content) return [];
     
@@ -253,41 +455,6 @@ const FeedScreen = ({ navigation, theme = THEMES.DARK }) => {
     return content.replace(imageRegex, '').trim();
   };
 
-  const toggleThread = (threadId) => {
-    setExpandedThreads(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(threadId)) {
-        newSet.delete(threadId);
-      } else {
-        newSet.add(threadId);
-      }
-      return newSet;
-    });
-  };
-
-  const toggleFollowedReply = (replyId) => {
-    setExpandedFollowedReplies(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(replyId)) {
-        newSet.delete(replyId);
-      } else {
-        newSet.add(replyId);
-      }
-      return newSet;
-    });
-  };
-
-  const toggleUnfollowedReplies = (threadId) => {
-    setExpandedUnfollowedReplies(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(threadId)) {
-        newSet.delete(threadId);
-      } else {
-        newSet.add(threadId);
-      }
-      return newSet;
-    });
-  };
 
   const handleLikePost = async (post) => {
     if (actionInProgress.has(post.id)) return;
@@ -518,7 +685,128 @@ const FeedScreen = ({ navigation, theme = THEMES.DARK }) => {
     });
   };
 
-  const renderPost = (post, isReply = false, depth = 0) => {
+  const navigateToPostDetail = (post) => {
+    console.log('📖 Navigating to post detail:', post.id.substring(0, 8) + '...');
+    navigation.navigate('PostDetail', {
+      post,
+      userProfiles
+    });
+  };
+
+  const handleReferencePress = (clickData) => {
+    if (!clickData) return;
+
+    switch (clickData.type) {
+      case 'user':
+        // Navigate to user profile
+        navigateToUserProfile(clickData.pubkey, clickData.profile?.name || clickData.profile?.display_name);
+        break;
+      case 'note':
+        // For note references, we could show the post detail
+        // For now, just show an alert
+        Alert.alert('Post Reference', 'This is a reference to another post');
+        break;
+      case 'event':
+        // For event references, similar to note
+        Alert.alert('Event Reference', 'This is a reference to a Nostr event');
+        break;
+      default:
+        console.log('Unknown reference type:', clickData.type);
+    }
+  };
+
+  const getReferencedPost = (referenceData) => {
+    if (referenceData.type === 'note') {
+      return referencedPosts.get(referenceData.data);
+    } else if (referenceData.type === 'nevent' && referenceData.data?.id) {
+      return referencedPosts.get(referenceData.data.id);
+    }
+    return null;
+  };
+
+  const renderContentWithReferences = (content) => {
+    const references = nostrUtils.parseNostrReferences(content);
+    
+    if (references.length === 0) {
+      return (
+        <Text style={[styles.postContent, { color: theme.textColor }]}>
+          {content}
+        </Text>
+      );
+    }
+
+    const parts = [];
+    let lastIndex = 0;
+
+    references.forEach((ref, refIndex) => {
+      // Add text before this reference
+      if (ref.startIndex > lastIndex) {
+        const beforeText = content.substring(lastIndex, ref.startIndex);
+        if (beforeText) {
+          parts.push(
+            <Text key={`text-${refIndex}`} style={[styles.postContent, { color: theme.textColor }]}>
+              {beforeText}
+            </Text>
+          );
+        }
+      }
+
+      // Handle the reference
+      if (ref.type === 'npub') {
+        // Show user reference as clickable text
+        const profile = userProfiles.get(ref.data);
+        const displayName = profile?.name || profile?.display_name || `${ref.data.substring(0, 8)}...`;
+        parts.push(
+          <Text
+            key={`ref-${refIndex}`}
+            style={[styles.referenceText, { color: theme.primaryColor }]}
+            onPress={() => navigateToUserProfile(ref.data, displayName)}
+          >
+            @{displayName}
+          </Text>
+        );
+      } else if (ref.type === 'note' || ref.type === 'nevent') {
+        // Show referenced post inline
+        const referencedPost = getReferencedPost(ref);
+        if (referencedPost) {
+          parts.push(
+            <View key={`ref-${refIndex}`} style={styles.referencedPostContainer}>
+              {renderPost(referencedPost, false, true)} {/* isReferencedPost = true */}
+            </View>
+          );
+        } else {
+          // Fallback if post not found
+          parts.push(
+            <Text key={`ref-${refIndex}`} style={[styles.referenceText, { color: theme.secondaryTextColor }]}>
+              📝 [Referenced post not found]
+            </Text>
+          );
+        }
+      }
+
+      lastIndex = ref.endIndex;
+    });
+
+    // Add remaining text after last reference
+    if (lastIndex < content.length) {
+      const remainingText = content.substring(lastIndex);
+      if (remainingText) {
+        parts.push(
+          <Text key="text-end" style={[styles.postContent, { color: theme.textColor }]}>
+            {remainingText}
+          </Text>
+        );
+      }
+    }
+
+    return (
+      <Text style={[styles.postContent, { color: theme.textColor }]}>
+        {parts}
+      </Text>
+    );
+  };
+
+  const renderPost = (post, isReply = false, isOriginalContext = false, isReferencedPost = false) => {
     const profile = userProfiles.get(post.pubkey);
     const indentStyle = isReply ? { marginLeft: 16, borderLeftWidth: 2, borderLeftColor: theme.borderColor, paddingLeft: 8 } : {};
     const images = extractImages(post.content);
@@ -534,7 +822,13 @@ const FeedScreen = ({ navigation, theme = THEMES.DARK }) => {
     const isReposted = repostsData.userReposted || repostedPosts.has(post.id);
     
     return (
-      <View key={post.id} style={[styles.post, { backgroundColor: theme.cardBackgroundColor }, indentStyle]}>
+      <View key={post.id} style={[
+        styles.post, 
+        { backgroundColor: theme.cardBackgroundColor }, 
+        indentStyle,
+        isOriginalContext && styles.originalContextPost,
+        isReferencedPost && styles.referencedPost
+      ]}>
         <View style={styles.postHeader}>
           <View style={styles.authorInfo}>
             {profile?.picture ? (
@@ -563,24 +857,37 @@ const FeedScreen = ({ navigation, theme = THEMES.DARK }) => {
           )}
         </View>
         
-        {textContent && (
-          <Text style={[styles.postContent, { color: theme.textColor }]}>
-            {textContent}
-          </Text>
-        )}
-        
-        {images.length > 0 && (
-          <View style={styles.imageContainer}>
-            {images.map((imageUrl, index) => (
-              <Image
-                key={index}
-                source={{ uri: imageUrl }}
-                style={[styles.postImage, { maxWidth: screenWidth - (isReply ? 80 : 32) }]}
-                resizeMode="contain"
-              />
-            ))}
-          </View>
-        )}
+        {/* Clickable content area */}
+        <TouchableOpacity 
+          style={styles.postContentArea}
+          onPress={() => !isOriginalContext && !isReferencedPost && navigateToPostDetail(post)}
+          activeOpacity={(isOriginalContext || isReferencedPost) ? 1 : 0.95}
+          disabled={isOriginalContext || isReferencedPost}
+        >
+          {textContent && (
+            isReferencedPost ? (
+              // For referenced posts, render content without nested references to avoid infinite recursion
+              <Text style={[styles.postContent, { color: theme.textColor }]}>
+                {textContent}
+              </Text>
+            ) : (
+              renderContentWithReferences(textContent)
+            )
+          )}
+          
+          {images.length > 0 && (
+            <View style={styles.imageContainer}>
+              {images.map((imageUrl, index) => (
+                <Image
+                  key={index}
+                  source={{ uri: imageUrl }}
+                  style={[styles.postImage, { maxWidth: screenWidth - (isReply ? 80 : 32) }]}
+                  resizeMode="contain"
+                />
+              ))}
+            </View>
+          )}
+        </TouchableOpacity>
         
         <View style={styles.postFooter}>
           <TouchableOpacity 
@@ -644,85 +951,33 @@ const FeedScreen = ({ navigation, theme = THEMES.DARK }) => {
   };
 
   const renderThread = (threadId, thread) => {
-    const { original, followedReplies, unfollowedReplies } = thread;
-    const hasFollowedReplies = followedReplies.length > 0;
-    const hasUnfollowedReplies = unfollowedReplies.length > 0;
+    const { original } = thread;
+    
+    if (!original) return null;
+
+    const replyToId = getReplyToId(original);
+    const originalPost = replyToId ? getOriginalPost(replyToId) : null;
+    const authorProfile = userProfiles.get(original.pubkey);
     
     return (
       <View key={threadId} style={styles.thread}>
-        {original && renderPost(original, false)}
-        
-        {/* Individual buttons for followed users' replies */}
-        {hasFollowedReplies && (
-          <View style={styles.repliesSection}>
-            {followedReplies.map(reply => {
-              const isExpanded = expandedFollowedReplies.has(reply.id);
-              const profile = userProfiles.get(reply.pubkey);
-              const authorName = profile?.name || profile?.display_name || 'Someone';
-              
-              return (
-                <View key={reply.id}>
-                  <TouchableOpacity 
-                    style={[styles.expandButton, { backgroundColor: theme.surfaceColor }]}
-                    onPress={() => toggleFollowedReply(reply.id)}
-                  >
-                    <Ionicons 
-                      name={isExpanded ? "chevron-up" : "chevron-down"} 
-                      size={16} 
-                      color={theme.secondaryTextColor} 
-                    />
-                    <Text style={[styles.expandButtonText, { color: theme.secondaryTextColor }]}>
-                      {isExpanded ? 'Hide' : 'Show'} 
-                      <Text 
-                        style={{ color: theme.primaryColor }}
-                        onPress={(e) => {
-                          e.stopPropagation();
-                          navigateToUserProfile(reply.pubkey, authorName);
-                        }}
-                      >
-                        {authorName}
-                      </Text>
-                      's reply
-                    </Text>
-                  </TouchableOpacity>
-                  
-                  {isExpanded && (
-                    <View style={styles.repliesContainer}>
-                      {renderPost(reply, true)}
-                    </View>
-                  )}
-                </View>
-              );
-            })}
-          </View>
-        )}
-        
-        {/* Grouped button for unfollowed users' replies */}
-        {hasUnfollowedReplies && (
-          <View style={styles.repliesSection}>
-            <TouchableOpacity 
-              style={[styles.expandButton, { backgroundColor: theme.surfaceColor }]}
-              onPress={() => toggleUnfollowedReplies(threadId)}
-            >
-              <Ionicons 
-                name={expandedUnfollowedReplies.has(threadId) ? "chevron-up" : "chevron-down"} 
-                size={16} 
-                color={theme.secondaryTextColor} 
-              />
-              <Text style={[styles.expandButtonText, { color: theme.secondaryTextColor }]}>
-                {expandedUnfollowedReplies.has(threadId) ? 'Hide' : 'Show'} {unfollowedReplies.length} {unfollowedReplies.length === 1 ? 'reply' : 'replies'}
-              </Text>
-            </TouchableOpacity>
+        {/* Show original post if this is a reply */}
+        {originalPost && (
+          <View style={styles.replyContext}>
+            {renderPost(originalPost, false, true)} {/* isOriginalContext = true */}
             
-            {expandedUnfollowedReplies.has(threadId) && (
-              <View style={styles.repliesContainer}>
-                {unfollowedReplies
-                  .sort((a, b) => a.created_at - b.created_at)
-                  .map(reply => renderPost(reply, true))}
-              </View>
-            )}
+            {/* "Replying to" indicator */}
+            <View style={styles.replyIndicator}>
+              <Ionicons name="return-down-forward" size={14} color={theme.secondaryTextColor} />
+              <Text style={[styles.replyText, { color: theme.secondaryTextColor }]}>
+                {authorProfile?.name || authorProfile?.display_name || 'Someone'} replied
+              </Text>
+            </View>
           </View>
         )}
+        
+        {/* Show the actual post/reply */}
+        {renderPost(original, isReply(original))}
       </View>
     );
   };
@@ -1057,6 +1312,9 @@ const styles = StyleSheet.create({
   timestamp: {
     fontSize: 12,
   },
+  postContentArea: {
+    // No extra styling needed - keeps the content naturally laid out
+  },
   postContent: {
     fontSize: 15,
     lineHeight: 20,
@@ -1091,25 +1349,42 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '500',
   },
-  repliesSection: {
-    marginTop: 2,
+  replyContext: {
+    marginBottom: 8,
   },
-  expandButton: {
+  originalContextPost: {
+    opacity: 0.8,
+    borderLeftWidth: 3,
+    borderLeftColor: '#8b5cf6', // Primary purple color
+    paddingLeft: 12,
+    marginBottom: 0,
+  },
+  replyIndicator: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 3,
-    paddingHorizontal: 8,
-    borderRadius: 12,
-    marginBottom: 1,
-    alignSelf: 'flex-start',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    gap: 6,
   },
-  expandButtonText: {
-    fontSize: 12,
-    marginLeft: 3,
+  replyText: {
+    fontSize: 13,
     fontWeight: '500',
+    fontStyle: 'italic',
   },
-  repliesContainer: {
-    marginTop: 2,
+  referenceText: {
+    fontWeight: '600',
+    textDecorationLine: 'underline',
+  },
+  referencedPostContainer: {
+    marginVertical: 8,
+  },
+  referencedPost: {
+    opacity: 0.9,
+    borderWidth: 1,
+    borderColor: 'rgba(139, 92, 246, 0.3)', // Light purple border
+    borderRadius: 8,
+    marginTop: 4,
+    marginBottom: 4,
   },
   emptyFeed: {
     alignItems: 'center',

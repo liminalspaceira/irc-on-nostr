@@ -17,6 +17,8 @@ import PrivateMessageScreen from './screens/PrivateMessageScreen';
 import PrivateConversationScreen from './screens/PrivateConversationScreen';
 import FeedScreen from './screens/FeedScreen';
 import UserProfileScreen from './screens/UserProfileScreen';
+import PostDetailScreen from './screens/PostDetailScreen';
+import FollowListScreen from './screens/FollowListScreen';
 
 // Services
 import { nostrService } from './services/NostrService';
@@ -170,6 +172,22 @@ function AppNavigator() {
         component={UserProfileScreen}
         options={({ route }) => ({ 
           title: route.params?.userName || 'User Profile',
+          presentation: 'card'
+        })}
+      />
+      <Stack.Screen 
+        name="PostDetail" 
+        component={PostDetailScreen}
+        options={{ 
+          title: 'Post',
+          presentation: 'card'
+        }}
+      />
+      <Stack.Screen 
+        name="FollowList" 
+        component={FollowListScreen}
+        options={({ route }) => ({ 
+          title: `${route.params?.userName || 'User'}'s ${route.params?.type || 'follows'}`,
           presentation: 'card'
         })}
       />

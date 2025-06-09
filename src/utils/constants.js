@@ -201,7 +201,8 @@ export const STORAGE_KEYS = {
   PROFILE: 'user_profile',
   CHANNELS: 'user_channels',
   THEME: 'app_theme',
-  SETTINGS: 'app_settings'
+  SETTINGS: 'app_settings',
+  DM_LAST_READ_TIMESTAMPS: 'dm_last_read_timestamps'
 };
 
 // Error Messages

@@ -38,6 +38,9 @@ const PrivateConversationScreen = ({ route, navigation, theme = THEMES.DARK }) =
 
     loadMessages();
     subscribeToMessages();
+    
+    // Mark conversation as read when opened
+    markAsRead();
 
     // If there's an initial message from /msg command, set it and send
     if (initialMessage) {
@@ -81,6 +84,14 @@ const PrivateConversationScreen = ({ route, navigation, theme = THEMES.DARK }) =
     } catch (error) {
       console.error('Failed to subscribe to messages:', error);
       setIsConnected(false);
+    }
+  };
+
+  const markAsRead = async () => {
+    try {
+      await nostrService.markConversationAsRead(contactPubkey);
+    } catch (error) {
+      console.error('Failed to mark conversation as read:', error);
     }
   };
 

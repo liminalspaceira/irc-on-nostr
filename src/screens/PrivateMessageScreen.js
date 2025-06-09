@@ -21,10 +21,88 @@ const PrivateMessageScreen = ({ navigation, theme = THEMES.DARK }) => {
   const [newContactInput, setNewContactInput] = useState('');
   const [showNewContact, setShowNewContact] = useState(false);
   const [userProfiles, setUserProfiles] = useState(new Map());
+  const [dmSubscriptionId, setDmSubscriptionId] = useState(null);
 
   useEffect(() => {
     loadConversations();
+    setupDMSubscription();
+
+    return () => {
+      // Cleanup subscription when component unmounts
+      if (dmSubscriptionId) {
+        nostrService.unsubscribe(dmSubscriptionId);
+      }
+    };
   }, []);
+
+  useEffect(() => {
+    // Refresh conversations when screen gains focus (user returns from conversation)
+    const unsubscribe = navigation.addListener('focus', () => {
+      loadConversations();
+    });
+
+    return unsubscribe;
+  }, [navigation]);
+
+  const setupDMSubscription = async () => {
+    try {
+      // Subscribe to new private messages for real-time updates
+      const subId = nostrService.subscribeToAllPrivateMessages(onNewPrivateMessage);
+      setDmSubscriptionId(subId);
+    } catch (error) {
+      console.error('Failed to setup DM subscription:', error);
+    }
+  };
+
+  const onNewPrivateMessage = async (newMessage, contactPubkey) => {
+    console.log('💬 New private message received from:', contactPubkey.substring(0, 8));
+    
+    // Update conversations with the new message
+    setConversations(prev => {
+      const updated = [...prev];
+      let conversation = updated.find(conv => conv.pubkey === contactPubkey);
+      
+      if (!conversation) {
+        // Create new conversation
+        conversation = {
+          pubkey: contactPubkey,
+          messages: [],
+          lastMessage: null,
+          unreadCount: 0
+        };
+        updated.push(conversation);
+      }
+      
+      // Check if message already exists
+      const messageExists = conversation.messages?.some(msg => msg.id === newMessage.id);
+      if (messageExists) return prev;
+      
+      // Add the new message
+      if (!conversation.messages) conversation.messages = [];
+      conversation.messages.push(newMessage);
+      conversation.messages.sort((a, b) => a.timestamp - b.timestamp);
+      
+      // Update last message
+      conversation.lastMessage = newMessage;
+      
+      // Increment unread count (will be recalculated properly on next load)
+      conversation.unreadCount = (conversation.unreadCount || 0) + 1;
+      
+      // Sort conversations by last message timestamp
+      updated.sort((a, b) => {
+        const aTime = a.lastMessage ? a.lastMessage.timestamp : 0;
+        const bTime = b.lastMessage ? b.lastMessage.timestamp : 0;
+        return bTime - aTime;
+      });
+      
+      return updated;
+    });
+
+    // Load profile for the message sender if we don't have it
+    if (!userProfiles.has(contactPubkey)) {
+      loadUserProfile(contactPubkey);
+    }
+  };
 
   const loadConversations = async () => {
     try {
