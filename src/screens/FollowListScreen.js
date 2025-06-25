@@ -43,32 +43,27 @@ const FollowListScreen = ({ route, navigation, theme = THEMES.DARK }) => {
 
       let userList = [];
       if (type === 'following') {
-        userList = await nostrService.getFollowing(userPubkey);
+        userList = await nostrService.getUserContacts(userPubkey);
       } else {
-        userList = await nostrService.getFollowers(userPubkey);
+        userList = await nostrService.getUserFollowers(userPubkey);
       }
 
       console.log(`✅ Found ${userList.length} ${type}`);
       setUsers(userList);
 
-      // Load profiles for all users
+      // Load profiles for all users using bulk method
       if (userList.length > 0) {
         console.log(`📊 Loading profiles for ${userList.length} users...`);
-        const profilesMap = new Map();
         
-        for (const pubkey of userList) {
-          try {
-            const profile = await nostrService.getUserProfile(pubkey);
-            if (profile) {
-              profilesMap.set(pubkey, profile);
-            }
-          } catch (error) {
-            console.error(`Error loading profile for ${pubkey.substring(0, 8)}:`, error);
-          }
+        try {
+          const profilesMap = await nostrService.getMultipleUserProfiles(userList);
+          setUserProfiles(profilesMap);
+          console.log(`✅ Loaded ${profilesMap.size} profiles out of ${userList.length} users`);
+        } catch (error) {
+          console.error('Error loading user profiles in bulk:', error);
+          // Fallback: set empty profiles map so UI doesn't hang
+          setUserProfiles(new Map());
         }
-        
-        setUserProfiles(profilesMap);
-        console.log(`✅ Loaded ${profilesMap.size} profiles`);
       }
     } catch (error) {
       console.error(`Error loading ${type}:`, error);
@@ -174,7 +169,16 @@ const FollowListScreen = ({ route, navigation, theme = THEMES.DARK }) => {
   return (
     <View style={[styles.container, { backgroundColor: theme.backgroundColor }]}>
       <ScrollView
-        style={styles.scrollView}
+        style={[
+          styles.scrollView,
+          {
+            overflow: 'auto', // Better scroll control for web
+            overflowX: 'hidden', // No horizontal scroll
+            maxHeight: 'calc(100vh - 100px)' // CSS calc for proper height on web
+          }
+        ]}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -202,6 +206,10 @@ const styles = StyleSheet.create({
   },
   scrollView: {
     flex: 1,
+  },
+  scrollContent: {
+    flexGrow: 1,
+    paddingBottom: 20,
   },
   centered: {
     justifyContent: 'center',

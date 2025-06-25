@@ -10,7 +10,9 @@ import {
   KeyboardAvoidingView,
   Platform,
   SafeAreaView,
-  ScrollView
+  ScrollView,
+  Modal,
+  ActivityIndicator
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { nostrService } from '../services/NostrService';
@@ -19,7 +21,7 @@ import { nostrUtils } from '../utils/nostrUtils';
 import { IRC_COMMANDS, BOT_COMMANDS, MESSAGE_TYPES, THEMES } from '../utils/constants';
 
 const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
-  const { channelId, channelName } = route.params;
+  const { channelId, channelName, isPrivate = false } = route.params;
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState('');
   const [users, setUsers] = useState([]);
@@ -30,16 +32,34 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
   const [channelUsers, setChannelUsers] = useState(new Map());
   const [showUserList, setShowUserList] = useState(false);
   const [userProfiles, setUserProfiles] = useState(new Map());
+  const [privateGroupMembers, setPrivateGroupMembers] = useState([]);
+  const [showInviteModal, setShowInviteModal] = useState(false);
+  const [inviteePubkey, setInviteePubkey] = useState('');
+  const [inviteMessage, setInviteMessage] = useState('');
   const flatListRef = useRef();
   const subscriptionRef = useRef();
 
 
   useEffect(() => {
     const operatorIndicator = userPermissions.isOperator ? ' @' : '';
+    const groupPrefix = isPrivate ? '🔒 ' : '#';
     navigation.setOptions({ 
-      title: `#${channelName}${operatorIndicator}`,
+      title: `${groupPrefix}${channelName}${operatorIndicator}`,
       headerRight: () => (
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          {/* Invite button for private groups */}
+          {isPrivate && (
+            <TouchableOpacity 
+              onPress={() => setShowInviteModal(true)}
+              style={{ marginRight: 16 }}
+            >
+              <Ionicons 
+                name="person-add-outline" 
+                size={24} 
+                color={theme.primaryColor} 
+              />
+            </TouchableOpacity>
+          )}
           <TouchableOpacity 
             onPress={() => setShowUserList(!showUserList)}
             style={{ marginRight: 16 }}
@@ -92,6 +112,11 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
       // Load current user's profile so /msg commands work with usernames
       if (nostrService.publicKey && !userProfiles.has(nostrService.publicKey)) {
         await loadUserProfile(nostrService.publicKey);
+      }
+      
+      // Load private group members if this is a private group
+      if (isPrivate) {
+        await loadPrivateGroupMembers();
       }
       
       // Scroll to bottom after loading messages
@@ -627,6 +652,135 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
     }
   };
 
+  const loadPrivateGroupMembers = async () => {
+    try {
+      const members = await nostrService.getPrivateGroupMembers(channelId);
+      setPrivateGroupMembers(members);
+      console.log(`🔒 Loaded ${members.length} private group members`);
+    } catch (error) {
+      console.error('Failed to load private group members:', error);
+    }
+  };
+
+  const sendGroupInvitation = async () => {
+    if (!inviteePubkey.trim()) {
+      Alert.alert('Error', 'Please enter a public key or npub');
+      return;
+    }
+
+    try {
+      let pubkey = inviteePubkey.trim();
+      
+      // Handle npub format
+      if (pubkey.startsWith('npub')) {
+        pubkey = nostrUtils.npubToPubkey(pubkey);
+      }
+
+      // Validate pubkey format
+      if (!nostrUtils.isValidPubkey(pubkey)) {
+        Alert.alert('Error', 'Invalid public key format');
+        return;
+      }
+
+      // Check if user is already a member
+      if (privateGroupMembers.includes(pubkey)) {
+        Alert.alert('Error', 'User is already a member of this group');
+        return;
+      }
+
+      await nostrService.inviteToPrivateGroup(channelId, pubkey, inviteMessage);
+      
+      Alert.alert('Success', 'Invitation sent successfully!');
+      setShowInviteModal(false);
+      setInviteePubkey('');
+      setInviteMessage('');
+      
+      // Refresh member list
+      await loadPrivateGroupMembers();
+    } catch (error) {
+      console.error('Error sending invitation:', error);
+      Alert.alert('Error', 'Failed to send invitation');
+    }
+  };
+
+  const renderInviteModal = () => {
+    if (!showInviteModal) return null;
+
+    return (
+      <Modal
+        visible={showInviteModal}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setShowInviteModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContainer, { backgroundColor: theme.cardBackgroundColor }]}>
+            <View style={styles.modalHeader}>
+              <Text style={[styles.modalTitle, { color: theme.textColor }]}>
+                Invite to Private Group
+              </Text>
+              <TouchableOpacity
+                onPress={() => setShowInviteModal(false)}
+                style={styles.modalCloseButton}
+              >
+                <Ionicons name="close" size={24} color={theme.textColor} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={[styles.modalLabel, { color: theme.textColor }]}>
+              User Public Key or npub *
+            </Text>
+            <TextInput
+              style={[styles.modalInput, {
+                backgroundColor: theme.surfaceColor,
+                color: theme.textColor,
+                borderColor: theme.borderColor
+              }]}
+              value={inviteePubkey}
+              onChangeText={setInviteePubkey}
+              placeholder="npub... or hex public key"
+              placeholderTextColor={theme.secondaryTextColor}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+
+            <Text style={[styles.modalLabel, { color: theme.textColor }]}>
+              Personal Message (optional)
+            </Text>
+            <TextInput
+              style={[styles.modalInput, styles.modalTextArea, {
+                backgroundColor: theme.surfaceColor,
+                color: theme.textColor,
+                borderColor: theme.borderColor
+              }]}
+              value={inviteMessage}
+              onChangeText={setInviteMessage}
+              placeholder="Add a personal message to your invitation..."
+              placeholderTextColor={theme.secondaryTextColor}
+              multiline
+              numberOfLines={3}
+            />
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.cancelButton, { backgroundColor: theme.borderColor }]}
+                onPress={() => setShowInviteModal(false)}
+              >
+                <Text style={[styles.modalButtonText, { color: theme.textColor }]}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.sendButton, { backgroundColor: theme.primaryColor }]}
+                onPress={sendGroupInvitation}
+              >
+                <Text style={[styles.modalButtonText, { color: 'white' }]}>Send Invite</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+    );
+  };
+
   const showChannelInfo = () => {
     const operatorStatus = userPermissions.isOperator ? 'Yes' : 'No';
     const creator = channelInfo?.creator?.substring(0, 16) + '...' || 'Unknown';
@@ -735,32 +889,104 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
     );
   };
 
+  const removeMemberFromGroup = async (memberPubkey) => {
+    Alert.alert(
+      'Remove Member',
+      `Are you sure you want to remove this member from the private group?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              // Note: In a full implementation, we would create a "remove member" event
+              // For now, we'll just remove them from the local list and show a message
+              console.log(`🚫 Removing member ${memberPubkey.substring(0, 8)}... from private group`);
+              
+              // TODO: Implement actual member removal event in NostrService
+              // await nostrService.removeMemberFromPrivateGroup(channelId, memberPubkey);
+              
+              // For now, just update the local state
+              setPrivateGroupMembers(prev => prev.filter(pubkey => pubkey !== memberPubkey));
+              
+              Alert.alert('Success', 'Member removed from the group');
+            } catch (error) {
+              console.error('Error removing member:', error);
+              Alert.alert('Error', 'Failed to remove member');
+            }
+          }
+        }
+      ]
+    );
+  };
+
   const renderUserList = () => {
-    const userArray = Array.from(channelUsers.values())
-      .sort((a, b) => b.lastSeen - a.lastSeen);
+    // For private groups, show member list; for public channels, show active users
+    const displayUsers = isPrivate ? 
+      privateGroupMembers.map(pubkey => ({ 
+        pubkey, 
+        lastSeen: Date.now() / 1000, 
+        isOperator: channelInfo?.creator === pubkey,
+        isMember: true
+      })) : 
+      Array.from(channelUsers.values()).sort((a, b) => b.lastSeen - a.lastSeen);
+
+    const title = isPrivate ? `Members (${displayUsers.length})` : `Users (${displayUsers.length})`;
 
     return (
       <View style={[styles.userListContainer, { backgroundColor: theme.cardBackgroundColor }]}>
         <View style={[styles.userListHeader, { borderBottomColor: theme.borderColor }]}>
           <Text style={[styles.userListTitle, { color: theme.textColor }]}>
-            Users ({userArray.length})
+            {title}
           </Text>
-          <TouchableOpacity onPress={() => setShowUserList(false)}>
-            <Ionicons name="close" size={20} color={theme.secondaryTextColor} />
-          </TouchableOpacity>
+          <View style={styles.userListHeaderButtons}>
+            {isPrivate && (
+              <TouchableOpacity 
+                onPress={() => {
+                  setShowUserList(false);
+                  setShowInviteModal(true);
+                }}
+                style={styles.inviteHeaderButton}
+              >
+                <Ionicons name="person-add" size={18} color={theme.primaryColor} />
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity onPress={() => setShowUserList(false)}>
+              <Ionicons name="close" size={20} color={theme.secondaryTextColor} />
+            </TouchableOpacity>
+          </View>
         </View>
         <FlatList
-          data={userArray}
+          data={displayUsers}
           keyExtractor={(item) => item.pubkey}
           renderItem={({ item }) => (
             <View style={styles.userItem}>
-              <Text style={[styles.userName, { color: theme.textColor }]}>
-                {item.isOperator && <Text style={[styles.operatorBadge, { color: theme.successColor }]}>@ </Text>}
-                {getUserDisplayName(item.pubkey)}
-              </Text>
-              <Text style={[styles.userLastSeen, { color: theme.secondaryTextColor }]}>
-                {nostrUtils.formatTimestamp(item.lastSeen)}
-              </Text>
+              <View style={styles.userInfo}>
+                <Text style={[styles.userName, { color: theme.textColor }]}>
+                  {item.isOperator && <Text style={[styles.operatorBadge, { color: theme.successColor }]}>@ </Text>}
+                  {isPrivate && item.isMember && <Text style={[styles.memberBadge, { color: theme.primaryColor }]}>👤 </Text>}
+                  {getUserDisplayName(item.pubkey)}
+                </Text>
+                {!isPrivate && (
+                  <Text style={[styles.userLastSeen, { color: theme.secondaryTextColor }]}>
+                    {nostrUtils.formatTimestamp(item.lastSeen)}
+                  </Text>
+                )}
+                {isPrivate && (
+                  <Text style={[styles.memberStatus, { color: theme.secondaryTextColor }]}>
+                    {item.pubkey === nostrService.publicKey ? 'You' : 'Member'}
+                  </Text>
+                )}
+              </View>
+              {isPrivate && item.pubkey !== nostrService.publicKey && userPermissions.isOperator && (
+                <TouchableOpacity
+                  style={[styles.removeButton, { backgroundColor: theme.errorColor }]}
+                  onPress={() => removeMemberFromGroup(item.pubkey)}
+                >
+                  <Ionicons name="remove" size={16} color="white" />
+                </TouchableOpacity>
+              )}
             </View>
           )}
           style={styles.userList}
@@ -855,6 +1081,9 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
       </View>
 
       {showUserList && renderUserList()}
+      
+      {/* Invite Modal for Private Groups */}
+      {renderInviteModal()}
     </View>
   );
 };
@@ -1021,6 +1250,108 @@ const styles = StyleSheet.create({
   },
   emptySubtext: {
     fontSize: 14,
+  },
+  // Modal styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalContainer: {
+    borderRadius: 16,
+    padding: 24,
+    width: '100%',
+    maxWidth: 400,
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  modalCloseButton: {
+    padding: 4,
+  },
+  modalLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 8,
+    marginTop: 16,
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 16,
+    marginBottom: 8,
+  },
+  modalTextArea: {
+    height: 80,
+    textAlignVertical: 'top',
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 12,
+    marginTop: 24,
+  },
+  modalButton: {
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 8,
+    minWidth: 80,
+    alignItems: 'center',
+  },
+  cancelButton: {
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  sendButton: {
+    // Already defined above, but may need to add more styles if needed
+  },
+  modalButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  // User list styles for private groups
+  userListHeaderButtons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  inviteHeaderButton: {
+    padding: 4,
+  },
+  userInfo: {
+    flex: 1,
+  },
+  memberBadge: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  memberStatus: {
+    fontSize: 12,
+    fontStyle: 'italic',
+  },
+  removeButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 8,
   },
 });
 

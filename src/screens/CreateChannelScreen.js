@@ -18,6 +18,7 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
   const [channelName, setChannelName] = useState('');
   const [channelDescription, setChannelDescription] = useState('');
   const [channelPicture, setChannelPicture] = useState('');
+  const [channelType, setChannelType] = useState('public'); // 'public' or 'private'
   const [isCreating, setIsCreating] = useState(false);
   
   // Modal states
@@ -60,7 +61,7 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
   };
 
   const createChannel = async () => {
-    console.log('🔧 Creating channel with name:', channelName);
+    console.log('🔧 Creating channel with name:', channelName, 'type:', channelType);
     const { cleanName, isValid } = validateChannelName(channelName);
     
     if (!cleanName.trim()) {
@@ -90,27 +91,40 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
 
     try {
       setIsCreating(true);
-      console.log('🚀 Starting channel creation...');
+      console.log(`🚀 Starting ${channelType} channel creation...`);
       
-      const event = await nostrService.createChannel(
-        cleanName,
-        channelDescription.trim() || `Channel #${cleanName}`,
-        channelPicture.trim()
-      );
+      let event;
+      if (channelType === 'private') {
+        // Create private group
+        event = await nostrService.createPrivateGroup(
+          cleanName,
+          channelDescription.trim() || `Private group: ${cleanName}`,
+          channelPicture.trim()
+        );
+      } else {
+        // Create public channel
+        event = await nostrService.createChannel(
+          cleanName,
+          channelDescription.trim() || `Channel #${cleanName}`,
+          channelPicture.trim()
+        );
+      }
       
       console.log('✅ Channel created successfully:', event.id);
       
+      const channelTypeText = channelType === 'private' ? 'Private group' : 'Channel';
       showAlert(
         'Success!', 
-        `Channel #${cleanName} created successfully!`,
+        `${channelTypeText} "${cleanName}" created successfully!`,
         [
           {
-            text: 'Join Channel',
+            text: `Join ${channelType === 'private' ? 'Group' : 'Channel'}`,
             onPress: () => {
               closeModal();
               navigation.replace('Channel', {
                 channelId: event.id,
-                channelName: cleanName
+                channelName: cleanName,
+                isPrivate: channelType === 'private'
               });
             }
           }
@@ -120,7 +134,7 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
       
     } catch (error) {
       console.error('❌ Failed to create channel:', error);
-      showAlert('Error', 'Failed to create channel. Please try again.', [], 'error');
+      showAlert('Error', `Failed to create ${channelType} group. Please try again.`, [], 'error');
     } finally {
       setIsCreating(false);
     }
@@ -146,11 +160,70 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
           Create New Channel
         </Text>
         <Text style={[styles.subtitle, { color: theme.secondaryTextColor }]}>
-          Set up a new public chat channel on Nostr
+          Set up a new {channelType} chat {channelType === 'private' ? 'group' : 'channel'} on Nostr
         </Text>
       </View>
 
       <View style={styles.form}>
+        {/* Channel Type Selection */}
+        <View style={styles.inputGroup}>
+          <Text style={[styles.label, { color: theme.textColor }]}>
+            Channel Type *
+          </Text>
+          <View style={styles.typeSelectionContainer}>
+            <TouchableOpacity
+              style={[
+                styles.typeButton,
+                {
+                  backgroundColor: channelType === 'public' ? theme.primaryColor : theme.surfaceColor,
+                  borderColor: channelType === 'public' ? theme.primaryColor : theme.borderColor
+                }
+              ]}
+              onPress={() => setChannelType('public')}
+            >
+              <Ionicons 
+                name="globe-outline" 
+                size={20} 
+                color={channelType === 'public' ? 'white' : theme.secondaryTextColor} 
+              />
+              <Text style={[
+                styles.typeButtonText,
+                { color: channelType === 'public' ? 'white' : theme.textColor }
+              ]}>
+                Public Channel
+              </Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity
+              style={[
+                styles.typeButton,
+                {
+                  backgroundColor: channelType === 'private' ? theme.primaryColor : theme.surfaceColor,
+                  borderColor: channelType === 'private' ? theme.primaryColor : theme.borderColor
+                }
+              ]}
+              onPress={() => setChannelType('private')}
+            >
+              <Ionicons 
+                name="lock-closed-outline" 
+                size={20} 
+                color={channelType === 'private' ? 'white' : theme.secondaryTextColor} 
+              />
+              <Text style={[
+                styles.typeButtonText,
+                { color: channelType === 'private' ? 'white' : theme.textColor }
+              ]}>
+                Private Group
+              </Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={[styles.helpText, { color: theme.secondaryTextColor }]}>
+            {channelType === 'public' 
+              ? 'Anyone can discover and join this channel'
+              : 'Invitation-only encrypted group chat (recommended for <50 members)'
+            }
+          </Text>
+        </View>
         <View style={styles.inputGroup}>
           <Text style={[styles.label, { color: theme.textColor }]}>
             Channel Name *
@@ -256,10 +329,16 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
 
       <View style={styles.infoBox}>
         <View style={[styles.infoContainer, { backgroundColor: theme.cardBackgroundColor }]}>
-          <Ionicons name="information-circle" size={20} color={theme.primaryColor} />
+          <Ionicons 
+            name={channelType === 'private' ? "shield-checkmark" : "information-circle"} 
+            size={20} 
+            color={theme.primaryColor} 
+          />
           <Text style={[styles.infoText, { color: theme.secondaryTextColor }]}>
-            Your channel will be public and discoverable by anyone on the Nostr network. 
-            You'll automatically become the channel operator.
+            {channelType === 'private' 
+              ? 'Your private group will be encrypted and invitation-only. Only invited members can see messages. You can invite up to 50 members for optimal performance.'
+              : 'Your channel will be public and discoverable by anyone on the Nostr network. You\'ll automatically become the channel operator.'
+            }
           </Text>
         </View>
       </View>
@@ -385,6 +464,26 @@ const styles = StyleSheet.create({
   helpText: {
     fontSize: 12,
     marginTop: 4,
+  },
+  typeSelectionContainer: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 8,
+  },
+  typeButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    borderWidth: 2,
+    gap: 8,
+  },
+  typeButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
   },
   characterCount: {
     fontSize: 12,

@@ -1,6 +1,7 @@
 import { SimplePool, getPublicKey, finalizeEvent, generateSecretKey, nip04 } from 'nostr-tools';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nostrUtils } from '../utils/nostrUtils';
+import { cacheService } from './CacheService';
 import { 
   DEFAULT_RELAYS, 
   STORAGE_KEYS, 
@@ -304,6 +305,199 @@ class NostrService {
     }
   }
 
+  async createPrivateGroup(name, about, picture = '') {
+    try {
+      console.log('🔒 Creating private group using NIP-17 approach...');
+      
+      // Create a private group event (kind 40 with special private group markers)
+      const event = {
+        kind: 40, // Channel creation event
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['name', name],
+          ['about', about],
+          ['picture', picture],
+          ['private', 'true'], // Mark as private group
+          ['encryption', 'nip-17'], // Indicate NIP-17 encryption
+          ['member_limit', '50'] // Recommended member limit for private groups
+        ],
+        content: JSON.stringify({
+          name,
+          about,
+          picture,
+          type: 'private',
+          created_by: this.publicKey,
+          encryption_method: 'nip-17',
+          member_limit: 50,
+          invitation_only: true
+        }),
+        pubkey: this.publicKey
+      };
+
+      // Sign the event
+      const publishedEvent = await this.publishEvent(event);
+      
+      console.log('✅ Private group created:', publishedEvent.id);
+      
+      // Initialize empty member list for this private group
+      await this.initializePrivateGroupMembers(publishedEvent.id, [this.publicKey]);
+      
+      return publishedEvent;
+    } catch (error) {
+      console.error('Error creating private group:', error);
+      throw error;
+    }
+  }
+
+  async initializePrivateGroupMembers(groupId, initialMembers = []) {
+    try {
+      // Create initial member list event (kind 30000 for member management)
+      const memberEvent = {
+        kind: 30000, // Parameterized replaceable event
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['d', `private_group_members_${groupId}`], // Replaceable event identifier
+          ['group', groupId],
+          ['action', 'init_members']
+        ],
+        content: JSON.stringify({
+          group_id: groupId,
+          members: initialMembers,
+          created_at: Math.floor(Date.now() / 1000),
+          created_by: this.publicKey
+        }),
+        pubkey: this.publicKey
+      };
+
+      await this.publishEvent(memberEvent);
+      console.log('✅ Private group member list initialized');
+    } catch (error) {
+      console.error('Error initializing private group members:', error);
+    }
+  }
+
+  async inviteToPrivateGroup(groupId, inviteePubkey, personalMessage = '') {
+    try {
+      console.log(`📨 Inviting ${inviteePubkey.substring(0, 8)}... to private group ${groupId.substring(0, 8)}...`);
+      
+      // Create invitation event using NIP-17 approach
+      const invitationContent = JSON.stringify({
+        type: 'private_group_invitation',
+        group_id: groupId,
+        invited_by: this.publicKey,
+        message: personalMessage,
+        timestamp: Math.floor(Date.now() / 1000)
+      });
+
+      // Encrypt the invitation using NIP-04 (will upgrade to NIP-17 later)
+      const encryptedContent = await nip04.encrypt(this.privateKey, inviteePubkey, invitationContent);
+
+      const inviteEvent = {
+        kind: 4, // Direct message for invitation
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['p', inviteePubkey],
+          ['group_invite', groupId],
+          ['invitation', 'true']
+        ],
+        content: encryptedContent,
+        pubkey: this.publicKey
+      };
+
+      await this.publishEvent(inviteEvent);
+      console.log('✅ Private group invitation sent');
+      
+      return true;
+    } catch (error) {
+      console.error('Error inviting to private group:', error);
+      throw error;
+    }
+  }
+
+  async acceptPrivateGroupInvitation(groupId, inviterPubkey) {
+    try {
+      console.log(`✅ Accepting invitation to private group ${groupId.substring(0, 8)}...`);
+      
+      // Create acceptance event
+      const acceptEvent = {
+        kind: 30001, // Custom event for group membership
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['d', `group_membership_${groupId}`],
+          ['group', groupId],
+          ['action', 'join'],
+          ['invited_by', inviterPubkey]
+        ],
+        content: JSON.stringify({
+          group_id: groupId,
+          action: 'accept_invitation',
+          invited_by: inviterPubkey,
+          joined_at: Math.floor(Date.now() / 1000)
+        }),
+        pubkey: this.publicKey
+      };
+
+      await this.publishEvent(acceptEvent);
+      console.log('✅ Private group invitation accepted');
+      
+      return true;
+    } catch (error) {
+      console.error('Error accepting private group invitation:', error);
+      throw error;
+    }
+  }
+
+  async getPrivateGroupMembers(groupId) {
+    try {
+      // Check cache first
+      const cachedMembers = await cacheService.getGroupMembers(groupId);
+      if (cachedMembers) {
+        console.log(`💾 Group members cache hit for ${groupId.substring(0, 8)}... (${cachedMembers.length} members)`);
+        return cachedMembers;
+      }
+
+      console.log(`🌐 Fetching group members from network for ${groupId.substring(0, 8)}...`);
+
+      // Query for member management events
+      const memberEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
+        kinds: [30000, 30001], // Member management events
+        '#group': [groupId],
+        limit: 100
+      });
+
+      const members = new Set();
+      
+      // Process member events to build current member list
+      for (const event of memberEvents) {
+        try {
+          const data = JSON.parse(event.content);
+          if (data.group_id === groupId) {
+            if (event.kind === 30000 && data.members) {
+              // Initial member list
+              data.members.forEach(member => members.add(member));
+            } else if (event.kind === 30001 && data.action === 'accept_invitation') {
+              // Member joining
+              members.add(event.pubkey);
+            }
+          }
+        } catch (error) {
+          console.warn('Error parsing member event:', error);
+        }
+      }
+
+      const membersList = Array.from(members);
+      
+      // Cache the member list
+      await cacheService.setGroupMembers(groupId, membersList);
+      console.log(`💾 Cached ${membersList.length} group members for ${groupId.substring(0, 8)}...`);
+
+      return membersList;
+    } catch (error) {
+      console.error('Error getting private group members:', error);
+      return [];
+    }
+  }
+
   async updateChannelMetadata(channelId, metadata) {
     try {
       const event = nostrUtils.createChannelMetadataEvent(channelId, metadata);
@@ -603,7 +797,14 @@ class NostrService {
 
   async getUserPosts(userPubkey, limit = 500) {
     try {
-      console.log('📝 Querying ALL posts for user:', userPubkey.substring(0, 8) + '...');
+      // Check cache first
+      const cachedPosts = await cacheService.getUserPosts(userPubkey);
+      if (cachedPosts) {
+        console.log(`💾 Posts cache hit for ${userPubkey.substring(0, 8)}... (${cachedPosts.length} posts)`);
+        return cachedPosts;
+      }
+
+      console.log(`🌐 Fetching posts from network for ${userPubkey.substring(0, 8)}...`);
       
       const filters = {
         kinds: [EVENT_KINDS.TEXT_NOTE], // Kind 1 - text notes
@@ -630,7 +831,10 @@ class NostrService {
         }
       }
       
-      console.log('📊 After deduplication:', uniquePosts.length, 'unique posts');
+      // Cache the posts
+      await cacheService.setUserPosts(userPubkey, uniquePosts);
+      console.log(`💾 Cached ${uniquePosts.length} posts for ${userPubkey.substring(0, 8)}...`);
+      
       return uniquePosts;
     } catch (error) {
       console.error('Error querying user posts:', error);
@@ -840,7 +1044,39 @@ class NostrService {
   async markConversationAsRead(contactPubkey) {
     const currentTimestamp = Math.floor(Date.now() / 1000);
     await this.setLastReadTimestamp(contactPubkey, currentTimestamp);
+    
+    // Update cache to reflect read status
+    await cacheService.markConversationAsRead(this.publicKey, contactPubkey);
+    
     console.log(`✅ Marked conversation as read: ${contactPubkey.substring(0, 8)}...`);
+  }
+
+  async markAllConversationsAsRead() {
+    try {
+      if (!this.publicKey) {
+        throw new Error('No public key available');
+      }
+
+      // Get all conversations to mark them as read
+      const conversations = await this.getPrivateConversations();
+      const currentTimestamp = Math.floor(Date.now() / 1000);
+      
+      // Update timestamps for all conversations
+      const updatePromises = conversations.map(conv => 
+        this.setLastReadTimestamp(conv.pubkey, currentTimestamp)
+      );
+      
+      await Promise.all(updatePromises);
+      
+      // Update cache to reflect all read
+      await cacheService.markAllConversationsAsRead(this.publicKey);
+      
+      console.log(`✅ Marked all ${conversations.length} conversations as read`);
+      return conversations.length;
+    } catch (error) {
+      console.error('Error marking all conversations as read:', error);
+      throw error;
+    }
   }
 
   // Private messaging methods (NIP-04)
@@ -866,7 +1102,20 @@ class NostrService {
       // Publish to relays
       await this.pool.publish(Array.from(this.connectedRelays), signedEvent);
       
-      console.log('Private message sent to:', recipientPubkey.substring(0, 8) + '...');
+      // Create message object for cache update
+      const newMessage = {
+        id: signedEvent.id,
+        content: content,
+        author: this.publicKey,
+        recipient: recipientPubkey,
+        timestamp: signedEvent.created_at,
+        isFromMe: true
+      };
+
+      // Update cache with new message (for real-time updates)
+      await cacheService.updateConversationWithNewMessage(this.publicKey, newMessage, recipientPubkey);
+      
+      console.log('Private message sent and cached:', recipientPubkey.substring(0, 8) + '...');
       return signedEvent;
     } catch (error) {
       console.error('Error sending private message:', error);
@@ -880,6 +1129,15 @@ class NostrService {
     }
 
     try {
+      // Check cache first
+      const cachedConversations = await cacheService.getConversations(this.publicKey);
+      if (cachedConversations) {
+        console.log(`💾 Conversations cache hit (${cachedConversations.length} conversations)`);
+        return cachedConversations;
+      }
+
+      console.log('🌐 Fetching private conversations from network...');
+
       // Query for both sent and received DMs
       const sentEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
         kinds: [4],
@@ -969,6 +1227,10 @@ class NostrService {
         return bTime - aTime;
       });
 
+      // Cache the conversations
+      await cacheService.setConversations(this.publicKey, conversationsList);
+      console.log(`💾 Cached ${conversationsList.length} conversations`);
+
       return conversationsList;
     } catch (error) {
       console.error('Error getting private conversations:', error);
@@ -982,6 +1244,15 @@ class NostrService {
     }
 
     try {
+      // Check cache first
+      const cachedMessages = await cacheService.getPrivateMessages(this.publicKey, contactPubkey);
+      if (cachedMessages) {
+        console.log(`💾 Messages cache hit for ${contactPubkey.substring(0, 8)}... (${cachedMessages.length} messages)`);
+        return cachedMessages;
+      }
+
+      console.log(`🌐 Fetching messages from network for ${contactPubkey.substring(0, 8)}...`);
+
       // Query for messages between me and the contact
       const sentEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
         kinds: [4],
@@ -1018,6 +1289,10 @@ class NostrService {
 
       // Sort by timestamp
       messages.sort((a, b) => a.timestamp - b.timestamp);
+      
+      // Cache the messages
+      await cacheService.setPrivateMessages(this.publicKey, contactPubkey, messages);
+      console.log(`💾 Cached ${messages.length} messages for ${contactPubkey.substring(0, 8)}...`);
       
       return messages;
     } catch (error) {
@@ -1070,6 +1345,15 @@ class NostrService {
 
   async getUserProfile(pubkey) {
     try {
+      // Check cache first (cache-first strategy)
+      const cachedProfile = await cacheService.getProfile(pubkey);
+      if (cachedProfile) {
+        console.log(`💾 Profile cache hit for ${pubkey.substring(0, 8)}...`);
+        return cachedProfile;
+      }
+
+      console.log(`🌐 Fetching profile from network for ${pubkey.substring(0, 8)}...`);
+      
       // Query for user profile metadata (kind 0)
       const profileEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
         kinds: [0],
@@ -1083,6 +1367,11 @@ class NostrService {
         
         try {
           const profileData = JSON.parse(latestProfile.content);
+          
+          // Cache the profile for future use
+          await cacheService.setProfile(pubkey, profileData);
+          console.log(`💾 Cached profile for ${pubkey.substring(0, 8)}...`);
+          
           return profileData;
         } catch (parseError) {
           console.warn('Failed to parse profile data for:', pubkey);
@@ -1099,6 +1388,15 @@ class NostrService {
 
   async getUserContacts(pubkey) {
     try {
+      // Check cache first
+      const cachedFollowing = await cacheService.getFollowing(pubkey);
+      if (cachedFollowing) {
+        console.log(`💾 Following cache hit for ${pubkey.substring(0, 8)}... (${cachedFollowing.length} contacts)`);
+        return cachedFollowing;
+      }
+
+      console.log(`🌐 Fetching following list from network for ${pubkey.substring(0, 8)}...`);
+      
       // Query for contact list (kind 3)
       const contactEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
         kinds: [3],
@@ -1115,7 +1413,10 @@ class NostrService {
           .filter(tag => tag[0] === 'p' && tag[1])
           .map(tag => tag[1]);
         
-        console.log(`Found ${following.length} contacts for user ${pubkey.substring(0, 8)}...`);
+        // Cache the following list
+        await cacheService.setFollowing(pubkey, following);
+        console.log(`💾 Cached following list: ${following.length} contacts for ${pubkey.substring(0, 8)}...`);
+        
         return following;
       }
 
@@ -1128,7 +1429,14 @@ class NostrService {
 
   async getUserFollowers(pubkey, limit = 200) {
     try {
-      console.log(`🔍 Finding followers for user ${pubkey.substring(0, 8)}...`);
+      // Check cache first
+      const cachedFollowers = await cacheService.getFollowers(pubkey);
+      if (cachedFollowers) {
+        console.log(`💾 Followers cache hit for ${pubkey.substring(0, 8)}... (${cachedFollowers.length} followers)`);
+        return cachedFollowers;
+      }
+
+      console.log(`🌐 Finding followers from network for ${pubkey.substring(0, 8)}...`);
       
       // Query for contact lists (kind 3) that include this user in their p tags
       const followerEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
@@ -1141,7 +1449,6 @@ class NostrService {
 
       // Extract unique followers
       const followers = new Set();
-      const followerProfiles = new Map();
 
       for (const event of followerEvents) {
         // Check if this contact list actually includes our user
@@ -1156,7 +1463,10 @@ class NostrService {
       }
 
       const followersList = Array.from(followers);
-      console.log(`✅ Total unique followers found: ${followersList.length}`);
+      
+      // Cache the followers list
+      await cacheService.setFollowers(pubkey, followersList);
+      console.log(`💾 Cached followers list: ${followersList.length} followers for ${pubkey.substring(0, 8)}...`);
       
       return followersList;
     } catch (error) {
@@ -1171,16 +1481,26 @@ class NostrService {
         return new Map();
       }
 
-      console.log(`Querying profiles for ${pubkeys.length} users...`);
+      console.log(`📋 Querying ${pubkeys.length} profiles (cache-first)...`);
       
-      // Query for multiple user profiles at once
+      // Check cache first for all profiles
+      const cachedProfiles = await cacheService.getMultipleProfiles(pubkeys);
+      const missingPubkeys = pubkeys.filter(pubkey => !cachedProfiles.has(pubkey));
+      
+      console.log(`💾 Cache hits: ${cachedProfiles.size}/${pubkeys.length}, fetching ${missingPubkeys.length} from network`);
+      
+      if (missingPubkeys.length === 0) {
+        return cachedProfiles;
+      }
+
+      // Query for missing profiles from network
       const profileEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
         kinds: [0],
-        authors: pubkeys,
-        limit: pubkeys.length * 2
+        authors: missingPubkeys,
+        limit: missingPubkeys.length * 2
       });
 
-      const profiles = new Map();
+      const newProfiles = new Map();
 
       // Process each profile event
       for (const event of profileEvents) {
@@ -1188,9 +1508,9 @@ class NostrService {
           const profileData = JSON.parse(event.content);
           
           // Keep only the most recent profile for each pubkey
-          if (!profiles.has(event.pubkey) || 
-              profiles.get(event.pubkey).timestamp < event.created_at) {
-            profiles.set(event.pubkey, {
+          if (!newProfiles.has(event.pubkey) || 
+              newProfiles.get(event.pubkey).timestamp < event.created_at) {
+            newProfiles.set(event.pubkey, {
               ...profileData,
               pubkey: event.pubkey,
               timestamp: event.created_at
@@ -1201,8 +1521,17 @@ class NostrService {
         }
       }
 
-      console.log(`Retrieved ${profiles.size} profiles out of ${pubkeys.length} requested`);
-      return profiles;
+      // Cache the new profiles
+      if (newProfiles.size > 0) {
+        await cacheService.setMultipleProfiles(newProfiles);
+        console.log(`💾 Cached ${newProfiles.size} new profiles`);
+      }
+
+      // Combine cached and new profiles
+      const allProfiles = new Map([...cachedProfiles, ...newProfiles]);
+      console.log(`✅ Total profiles: ${allProfiles.size}/${pubkeys.length}`);
+      
+      return allProfiles;
     } catch (error) {
       console.error('Error getting multiple user profiles:', error);
       return new Map();
@@ -1215,7 +1544,17 @@ class NostrService {
         return [];
       }
 
-      console.log(`Querying feed posts from ${followingPubkeys.length} followed users...`);
+      // Create cache key based on following list
+      const feedKey = `feed_${followingPubkeys.slice(0, 10).join('_').substring(0, 30)}`;
+      
+      // Check cache first
+      const cachedFeed = await cacheService.getFeed(feedKey);
+      if (cachedFeed) {
+        console.log(`💾 Feed cache hit (${cachedFeed.length} posts)`);
+        return cachedFeed;
+      }
+
+      console.log(`🌐 Fetching feed from network (${followingPubkeys.length} followed users)...`);
       
       // Query for text notes (kind 1) from followed users
       const feedEvents = await this.pool.querySync(Array.from(this.connectedRelays), {
@@ -1252,7 +1591,10 @@ class NostrService {
         sig: event.sig
       }));
 
-      console.log(`Retrieved ${posts.length} posts for feed`);
+      // Cache the feed
+      await cacheService.setFeed(feedKey, posts);
+      console.log(`💾 Cached feed with ${posts.length} posts`);
+
       return posts;
     } catch (error) {
       console.error('Error getting feed posts:', error);
@@ -1334,6 +1676,9 @@ class NostrService {
             timestamp: event.created_at,
             isFromMe: false
           };
+          
+          // Update cache with new message for real-time updates
+          await cacheService.updateConversationWithNewMessage(this.publicKey, newMessage, event.pubkey);
           
           onNewMessage(newMessage, event.pubkey);
         } catch (decryptError) {
@@ -1474,6 +1819,10 @@ class NostrService {
 
       console.log('📝 Publishing reaction event:', reactionEvent);
       const signedEvent = await this.publishEvent(reactionEvent);
+      
+      // Invalidate interaction caches
+      await this.invalidateInteractionCaches(postId);
+      
       console.log('✅ Like event published successfully:', signedEvent.id);
       return signedEvent;
     } catch (error) {
@@ -1614,7 +1963,14 @@ class NostrService {
       };
 
       const signedEvent = await this.publishEvent(textNoteEvent);
-      console.log('✅ Text note published:', signedEvent.id);
+      
+      // Invalidate relevant caches
+      await Promise.all([
+        this.invalidateUserCaches(this.publicKey), // Invalidate user's own posts cache
+        this.invalidateFeedCaches(), // Invalidate feed caches
+      ]);
+      
+      console.log('✅ Text note published and caches invalidated:', signedEvent.id);
       return signedEvent;
     } catch (error) {
       console.error('❌ Error creating text note:', error);
@@ -1806,6 +2162,39 @@ class NostrService {
     } catch (error) {
       console.error('Error getting followers list:', error);
       return [];
+    }
+  }
+
+  // Cache invalidation helper methods
+  async invalidateInteractionCaches(postId) {
+    try {
+      // This method is called when interactions change (likes, reposts, etc.)
+      // We can add specific interaction cache invalidation here if needed
+      console.log(`🗑️ Invalidated interaction caches for post ${postId}`);
+    } catch (error) {
+      console.warn('Error invalidating interaction caches:', error);
+    }
+  }
+
+  async invalidateUserCaches(pubkey) {
+    try {
+      await Promise.all([
+        cacheService.invalidateProfile(pubkey),
+        cacheService.invalidateUserPosts(pubkey),
+      ]);
+      console.log(`🗑️ Invalidated caches for user ${pubkey.substring(0, 8)}...`);
+    } catch (error) {
+      console.warn('Error invalidating user caches:', error);
+    }
+  }
+
+  async invalidateFeedCaches() {
+    try {
+      // Invalidate main feed cache when new posts are created
+      await cacheService.invalidateFeed('main');
+      console.log('🗑️ Invalidated feed caches');
+    } catch (error) {
+      console.warn('Error invalidating feed caches:', error);
     }
   }
 

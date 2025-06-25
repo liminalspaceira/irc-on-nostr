@@ -22,6 +22,7 @@ const PrivateMessageScreen = ({ navigation, theme = THEMES.DARK }) => {
   const [showNewContact, setShowNewContact] = useState(false);
   const [userProfiles, setUserProfiles] = useState(new Map());
   const [dmSubscriptionId, setDmSubscriptionId] = useState(null);
+  const [markingAllAsRead, setMarkingAllAsRead] = useState(false);
 
   useEffect(() => {
     loadConversations();
@@ -191,6 +192,26 @@ const PrivateMessageScreen = ({ navigation, theme = THEMES.DARK }) => {
     });
   };
 
+  const markAllAsRead = async () => {
+    try {
+      setMarkingAllAsRead(true);
+      const count = await nostrService.markAllConversationsAsRead();
+      
+      // Update local state to reflect all conversations as read
+      setConversations(prev => prev.map(conv => ({
+        ...conv,
+        unreadCount: 0
+      })));
+      
+      Alert.alert('Success', `Marked ${count} conversations as read`);
+    } catch (error) {
+      console.error('Error marking all as read:', error);
+      Alert.alert('Error', 'Failed to mark all conversations as read');
+    } finally {
+      setMarkingAllAsRead(false);
+    }
+  };
+
   const renderConversation = ({ item }) => {
     const timeStr = item.lastMessage ? nostrUtils.formatTimestamp(item.lastMessage.timestamp) : '';
     const hasUnread = item.unreadCount > 0;
@@ -291,16 +312,37 @@ const PrivateMessageScreen = ({ navigation, theme = THEMES.DARK }) => {
         <Text style={[styles.headerTitle, { color: theme.textColor }]}>
           Private Messages
         </Text>
-        <TouchableOpacity
-          style={styles.newMessageButton}
-          onPress={() => setShowNewContact(!showNewContact)}
-        >
-          <Ionicons 
-            name={showNewContact ? "close" : "add"} 
-            size={24} 
-            color={theme.primaryColor} 
-          />
-        </TouchableOpacity>
+        <View style={styles.headerButtons}>
+          {/* Mark All as Read Button */}
+          {conversations.some(conv => conv.unreadCount > 0) && (
+            <TouchableOpacity
+              style={[styles.markAllReadButton, { backgroundColor: theme.primaryColor }]}
+              onPress={markAllAsRead}
+              disabled={markingAllAsRead}
+            >
+              {markingAllAsRead ? (
+                <Ionicons name="sync" size={16} color="white" />
+              ) : (
+                <Ionicons name="checkmark-done" size={16} color="white" />
+              )}
+              <Text style={styles.markAllReadText}>
+                {markingAllAsRead ? 'Reading...' : 'Mark All Read'}
+              </Text>
+            </TouchableOpacity>
+          )}
+          
+          {/* New Message Button */}
+          <TouchableOpacity
+            style={styles.newMessageButton}
+            onPress={() => setShowNewContact(!showNewContact)}
+          >
+            <Ionicons 
+              name={showNewContact ? "close" : "add"} 
+              size={24} 
+              color={theme.primaryColor} 
+            />
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* New contact input */}
@@ -357,6 +399,24 @@ const styles = StyleSheet.create({
   },
   headerTitle: {
     fontSize: 18,
+    fontWeight: '600',
+  },
+  headerButtons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  markAllReadButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    gap: 4,
+  },
+  markAllReadText: {
+    color: 'white',
+    fontSize: 12,
     fontWeight: '600',
   },
   newMessageButton: {

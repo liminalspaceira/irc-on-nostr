@@ -16,6 +16,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getPublicKey, nip19 } from 'nostr-tools';
 import { nostrService } from '../services/NostrService';
 import { nostrUtils } from '../utils/nostrUtils';
+import CacheManager from '../components/CacheManager';
 import { STORAGE_KEYS, THEMES, DEFAULT_RELAYS } from '../utils/constants';
 
 const SettingsScreen = ({ theme = THEMES.DARK }) => {
@@ -422,6 +423,9 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
           )}
         </View>
       ))}
+
+      {/* Cache Management */}
+      <CacheManager theme={theme} />
 
       {/* Relays */}
       {renderSection('Nostr Relays', (
