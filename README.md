@@ -61,12 +61,6 @@ A decentralized IRC-like chat application built on the Nostr protocol, bringing 
 - `/users` - List active channel users with last seen timestamps  
 - `/topic [text]` - Set/view channel topic (operators only)
 
-#### 👑 Moderation Commands (Operators Only)
-- `/kick [user] [reason]` - Remove user from channel with optional reason
-- `/ban [user] [reason]` - Ban user from channel with optional reason  
-- `/op [user]` - Grant operator status to user
-- `/deop [user]` - Remove operator status from user
-
 #### 💬 Communication Commands
 - `/msg [username|pubkey|npub] [message]` - Send private message with username resolution
 
