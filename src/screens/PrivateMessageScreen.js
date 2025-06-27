@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { nostrService } from '../services/NostrService';
+import { notificationService } from '../services/NotificationService';
 import { nostrUtils } from '../utils/nostrUtils';
 import { THEMES } from '../utils/constants';
 
@@ -98,6 +99,12 @@ const PrivateMessageScreen = ({ navigation, theme = THEMES.DARK }) => {
       
       return updated;
     });
+
+    // Show notification for new private message (only if not from current user)
+    if (newMessage.author !== nostrService.publicKey) {
+      const senderName = getUserDisplayName(contactPubkey) || 'Unknown User';
+      notificationService.notifyPrivateMessage(senderName, newMessage.content);
+    }
 
     // Load profile for the message sender if we don't have it
     if (!userProfiles.has(contactPubkey)) {
@@ -194,21 +201,33 @@ const PrivateMessageScreen = ({ navigation, theme = THEMES.DARK }) => {
 
   const markAllAsRead = async () => {
     try {
+      console.log('🔄 UI: Starting mark all as read...');
       setMarkingAllAsRead(true);
-      const count = await nostrService.markAllConversationsAsRead();
       
-      // Update local state to reflect all conversations as read
+      // Add timeout to prevent infinite hanging
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Operation timed out')), 10000)
+      );
+      
+      const markPromise = nostrService.markAllConversationsAsRead();
+      const count = await Promise.race([markPromise, timeoutPromise]);
+      
+      console.log(`📝 UI: Marked ${count} conversations as read, updating UI...`);
+      
+      // Update local UI state to reflect all conversations as read
       setConversations(prev => prev.map(conv => ({
         ...conv,
         unreadCount: 0
       })));
       
+      console.log('✅ UI: All done!');
       Alert.alert('Success', `Marked ${count} conversations as read`);
     } catch (error) {
-      console.error('Error marking all as read:', error);
-      Alert.alert('Error', 'Failed to mark all conversations as read');
+      console.error('❌ UI: Error marking all as read:', error);
+      Alert.alert('Error', `Failed to mark all conversations as read: ${error.message}`);
     } finally {
       setMarkingAllAsRead(false);
+      console.log('🏁 UI: Mark all as read finished');
     }
   };
 

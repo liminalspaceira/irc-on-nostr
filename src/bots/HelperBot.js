@@ -1,5 +1,5 @@
-import { BaseBot } from './BotFramework';
-import { BOT_RESPONSE_TYPES } from '../utils/constants';
+import { BaseBot, botFramework } from './BotFramework';
+import { BOT_RESPONSE_TYPES, IRC_COMMANDS } from '../utils/constants';
 
 export class HelperBot extends BaseBot {
   constructor() {
@@ -11,15 +11,16 @@ export class HelperBot extends BaseBot {
     this.addCommand('about', 'Show information about the IRC on Nostr system');
     this.addCommand('time', 'Show current server time');
     
-    // Help content
+    // IRC Commands - get from constants and add descriptions
     this.ircCommands = [
-      { command: '/help', description: 'Show IRC commands help' },
-      { command: '/users', description: 'List channel users' },
-      { command: '/topic <text>', description: 'Set channel topic (ops only)' },
-      { command: '/kick <user> [reason]', description: 'Kick user (ops only)' },
-      { command: '/ban <user> [reason]', description: 'Ban user (ops only)' },
-      { command: '/op <user>', description: 'Grant operator status (ops only)' },
-      { command: '/deop <user>', description: 'Remove operator status (ops only)' }
+      { command: '/help', description: 'Show IRC commands help with protocol-specific features' },
+      { command: '/users', description: 'List active channel users with last seen timestamps' },
+      { command: '/topic [text]', description: 'Set/view channel topic (operators only)' },
+      { command: '/kick [user] [reason]', description: 'Remove user (permanent in NIP-29, visual-only in others)' },
+      { command: '/ban [user] [reason]', description: 'Ban user (permanent in NIP-29, visual-only in others)' },
+      { command: '/op [user]', description: 'Grant operator status (real power in NIP-29, visual-only in others)' },
+      { command: '/deop [user]', description: 'Remove operator status (real effect in NIP-29, visual-only in others)' },
+      { command: '/msg [username|pubkey|npub] [message]', description: 'Send private message with username resolution' }
     ];
   }
 
@@ -50,36 +51,58 @@ export class HelperBot extends BaseBot {
         return this.getSpecificCommandHelp(requestedCommand);
       }
 
-      // Show general help
+      // Get all bot commands dynamically from framework
+      const allBotCommands = botFramework.getCommands();
+      const totalBotCommands = allBotCommands.length;
+      const totalIrcCommands = this.ircCommands.length;
+      
+      // Group bot commands by category
+      const helperCommands = allBotCommands.filter(cmd => ['help', 'commands', 'about', 'time'].includes(cmd.command));
+      const statsCommands = allBotCommands.filter(cmd => ['stats', 'uptime'].includes(cmd.command));
+      const weatherCommands = allBotCommands.filter(cmd => ['weather', 'forecast'].includes(cmd.command));
+      const gameCommands = allBotCommands.filter(cmd => ['roll', 'flip', '8ball', 'rps', 'number'].includes(cmd.command));
+      const pokerCommands = allBotCommands.filter(cmd => ['poker', 'solo', 'join', 'commit', 'reveal', 'start', 'bet', 'call', 'check', 'fold', 'raise', 'verify', 'games', 'hand', 'chips', 'status', 'cards'].includes(cmd.command));
+
+      // Show comprehensive help
       const helpContent = [
-        '🤖 **IRC on Nostr - Bot Help**',
+        '🤖 **IRC on Nostr - Complete Command Reference**',
         '',
-        '**📋 IRC Commands (start with /)**',
+        '**📋 IRC Commands (8 commands)**',
         ...this.ircCommands.map(cmd => `\`${cmd.command}\` - ${cmd.description}`),
         '',
-        '**🤖 Bot Commands (start with !)**',
-        '`!help [command]` - Show this help or help for specific command',
-        '`!commands` - List all bot commands',
-        '`!stats` - Show channel statistics',
-        '`!uptime` - Show bot uptime',
-        '`!weather <location>` - Get weather information',
-        '`!roll [dice]` - Roll dice (e.g., 2d6, d20)',
-        '`!flip` - Flip a coin',
-        '`!8ball <question>` - Ask the magic 8-ball',
-        '`!about` - About IRC on Nostr',
-        '`!time` - Show current time',
+        '**🤖 Bot Commands (32 commands)**',
+        '',
+        '**🛠️ Helper & Information (4 commands)**',
+        ...helperCommands.map(cmd => `\`!${cmd.command}\` - ${cmd.description || 'No description'}`),
+        '',
+        '**📊 Statistics & Monitoring (2 commands)**',
+        ...statsCommands.map(cmd => `\`!${cmd.command}\` - ${cmd.description || 'No description'}`),
+        '',
+        '**🌤️ Weather Information (2 commands)**',
+        ...weatherCommands.map(cmd => `\`!${cmd.command}\` - ${cmd.description || 'No description'}`),
+        '',
+        '**🎮 Gaming & Entertainment (5 commands)**',
+        ...gameCommands.map(cmd => `\`!${cmd.command}\` - ${cmd.description || 'No description'}`),
+        '',
+        '**🃏 Complete Poker Game System (17 commands)**',
+        ...pokerCommands.map(cmd => `\`!${cmd.command}\` - ${cmd.description || 'No description'}`),
+        '',
+        `**📊 Total Commands:** ${totalBotCommands + totalIrcCommands} (${totalBotCommands} bot + ${totalIrcCommands} IRC)`,
         '',
         '**ℹ️ Examples:**',
         '• `!weather New York` - Get weather for New York',
+        '• `!poker 100 4` - Start 4-player poker game with 100 chip ante',
         '• `!roll 2d10+5` - Roll 2 ten-sided dice with +5 modifier',
-        '• `!help weather` - Get help for weather command',
+        '• `!help poker` - Get detailed help for poker commands',
         '',
-        '💡 **Tip:** Try different commands to explore the system!'
+        '💡 **Tip:** Use `!help <command>` for detailed help on any specific command!'
       ].join('\n');
 
       return this.createResponse(helpContent, BOT_RESPONSE_TYPES.TEXT, {
         type: 'general_help',
-        commandCount: this.ircCommands.length + 10 // approximate bot commands
+        botCommands: totalBotCommands,
+        ircCommands: totalIrcCommands,
+        totalCommands: totalBotCommands + totalIrcCommands
       });
 
     } catch (error) {
@@ -90,33 +113,30 @@ export class HelperBot extends BaseBot {
 
   async listCommands(context) {
     try {
-      // This would ideally get the actual registered commands from the framework
-      const botCommands = [
-        '!help', '!commands', '!about', '!time',
-        '!stats', '!uptime', '!users',
-        '!weather', '!forecast',
-        '!roll', '!flip', '!8ball', '!rps', '!number'
-      ];
+      // Get all bot commands dynamically from framework
+      const allBotCommands = botFramework.getCommands();
+      const totalBotCommands = allBotCommands.length;
+      const totalIrcCommands = this.ircCommands.length;
 
       const commandsContent = [
         '📋 **Available Bot Commands**',
         '',
         '**🤖 Bot Commands:**',
-        ...botCommands.map(cmd => `• \`${cmd}\``),
+        ...allBotCommands.map(cmd => `• \`!${cmd.command}\``),
         '',
         '**📖 IRC Commands:**',
         ...this.ircCommands.map(cmd => `• \`${cmd.command}\``),
         '',
-        `**Total Commands:** ${botCommands.length + this.ircCommands.length}`,
+        `**Total Commands:** ${totalBotCommands + totalIrcCommands} (${totalBotCommands} bot + ${totalIrcCommands} IRC)`,
         '',
         '💡 Use `!help <command>` for detailed help on any command'
       ].join('\n');
 
       return this.createResponse(commandsContent, BOT_RESPONSE_TYPES.TEXT, {
         type: 'command_list',
-        botCommands: botCommands.length,
-        ircCommands: this.ircCommands.length,
-        total: botCommands.length + this.ircCommands.length
+        botCommands: totalBotCommands,
+        ircCommands: totalIrcCommands,
+        total: totalBotCommands + totalIrcCommands
       });
 
     } catch (error) {
@@ -245,6 +265,92 @@ export class HelperBot extends BaseBot {
         description: 'Show bot uptime and status information',
         usage: '!uptime',
         examples: ['!uptime']
+      },
+      // Poker Commands
+      'poker': {
+        description: 'Start new multi-player poker game (2-6 players)',
+        usage: '!poker <ante> [max_players]',
+        examples: ['!poker 100', '!poker 50 4', '!poker 200 6']
+      },
+      'solo': {
+        description: 'Play solo Texas Hold\'em against intelligent AI',
+        usage: '!solo <ante> [difficulty]',
+        examples: ['!solo 100', '!solo 50 easy', '!solo 200 hard']
+      },
+      'join': {
+        description: 'Join existing poker game in the channel',
+        usage: '!join <ante>',
+        examples: ['!join 100']
+      },
+      'commit': {
+        description: 'Commit random number for cryptographic deck shuffling',
+        usage: '!commit <number> <salt>',
+        examples: ['!commit 12345 mysalt123']
+      },
+      'reveal': {
+        description: 'Reveal committed number to generate provably fair deck',
+        usage: '!reveal',
+        examples: ['!reveal']
+      },
+      'start': {
+        description: 'Start committed game after all players have joined',
+        usage: '!start',
+        examples: ['!start']
+      },
+      'bet': {
+        description: 'Place initial bet in current betting round',
+        usage: '!bet <amount>',
+        examples: ['!bet 50', '!bet 100']
+      },
+      'call': {
+        description: 'Call current bet amount',
+        usage: '!call',
+        examples: ['!call']
+      },
+      'check': {
+        description: 'Check (stay in hand without betting when no bet to call)',
+        usage: '!check',
+        examples: ['!check']
+      },
+      'fold': {
+        description: 'Fold hand and exit current round',
+        usage: '!fold',
+        examples: ['!fold']
+      },
+      'raise': {
+        description: 'Raise current bet by specified amount',
+        usage: '!raise <amount>',
+        examples: ['!raise 50', '!raise 100']
+      },
+      'verify': {
+        description: 'Verify cryptographic fairness of completed game',
+        usage: '!verify <game_id>',
+        examples: ['!verify abc123']
+      },
+      'games': {
+        description: 'List all active poker games in the channel',
+        usage: '!games',
+        examples: ['!games']
+      },
+      'hand': {
+        description: 'Show your current poker hand (cards and strength)',
+        usage: '!hand',
+        examples: ['!hand']
+      },
+      'chips': {
+        description: 'Show current chip count and betting position',
+        usage: '!chips',
+        examples: ['!chips']
+      },
+      'status': {
+        description: 'Show detailed current game status and betting round',
+        usage: '!status',
+        examples: ['!status']
+      },
+      'cards': {
+        description: 'View your private cards in secure modal interface',
+        usage: '!cards',
+        examples: ['!cards']
       }
     };
 

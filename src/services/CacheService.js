@@ -441,6 +441,18 @@ class CacheService {
     await AsyncStorage.removeItem(key);
   }
 
+  async invalidateFollowing(pubkey) {
+    const key = `${CACHE_CONFIG.KEYS.FOLLOWING}_${pubkey}`;
+    this.memoryCache.delete(key);
+    await AsyncStorage.removeItem(key);
+  }
+
+  async invalidateFollowers(pubkey) {
+    const key = `${CACHE_CONFIG.KEYS.FOLLOWERS}_${pubkey}`;
+    this.memoryCache.delete(key);
+    await AsyncStorage.removeItem(key);
+  }
+
   // Cache cleanup methods
   async cleanupExpiredCache() {
     try {

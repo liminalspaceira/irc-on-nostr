@@ -154,16 +154,42 @@ export class NostrUtils {
 
   parseChannelEvent(event) {
     try {
-      const content = JSON.parse(event.content);
-      return {
-        id: event.id,
-        name: content.name,
-        about: content.about,
-        picture: content.picture,
-        creator: event.pubkey,
-        createdAt: event.created_at,
-        relays: this.extractRelaysFromTags(event.tags)
-      };
+      // Check if this is an encrypted group by looking at tags
+      const isEncrypted = event.tags?.some(tag => tag[0] === 'encrypted' && tag[1] === 'true');
+      
+      if (isEncrypted) {
+        // For encrypted groups, extract metadata from tags instead of trying to parse encrypted content
+        const nameTag = event.tags?.find(tag => tag[0] === 'name');
+        const aboutTag = event.tags?.find(tag => tag[0] === 'about');
+        const pictureTag = event.tags?.find(tag => tag[0] === 'picture');
+        
+        console.log(`🔐 Parsing encrypted group: ${nameTag ? nameTag[1] : 'Unknown'}`);
+        
+        return {
+          id: event.id,
+          name: nameTag ? nameTag[1] : 'Encrypted Group',
+          about: aboutTag ? aboutTag[1] : 'Encrypted Private Group',
+          picture: pictureTag ? pictureTag[1] : '',
+          creator: event.pubkey,
+          createdAt: event.created_at,
+          relays: this.extractRelaysFromTags(event.tags),
+          encrypted: true,  // Mark as encrypted for detection
+          protocol: 'encrypted',  // Set protocol for easy detection
+          tags: event.tags  // Include tags for detection logic
+        };
+      } else {
+        // For regular channels, parse content as JSON
+        const content = JSON.parse(event.content);
+        return {
+          id: event.id,
+          name: content.name,
+          about: content.about,
+          picture: content.picture,
+          creator: event.pubkey,
+          createdAt: event.created_at,
+          relays: this.extractRelaysFromTags(event.tags)
+        };
+      }
     } catch (error) {
       console.error('Error parsing channel event:', error);
       return null;

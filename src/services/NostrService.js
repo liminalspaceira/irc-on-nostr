@@ -2,6 +2,7 @@ import { SimplePool, getPublicKey, finalizeEvent, generateSecretKey, nip04 } fro
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { nostrUtils } from '../utils/nostrUtils';
 import { cacheService } from './CacheService';
+import { groupEncryptionService } from './GroupEncryptionService';
 import { 
   DEFAULT_RELAYS, 
   STORAGE_KEYS, 
@@ -307,7 +308,7 @@ class NostrService {
 
   async createPrivateGroup(name, about, picture = '') {
     try {
-      console.log('🔒 Creating private group using NIP-17 approach...');
+      console.log('⚠️ Creating private channel using basic privacy flag (not real NIP-17)...');
       
       // Create a private group event (kind 40 with special private group markers)
       const event = {
@@ -318,7 +319,7 @@ class NostrService {
           ['about', about],
           ['picture', picture],
           ['private', 'true'], // Mark as private group
-          ['encryption', 'nip-17'], // Indicate NIP-17 encryption
+          ['privacy', 'basic'], // Basic privacy flag only - no real encryption
           ['member_limit', '50'] // Recommended member limit for private groups
         ],
         content: JSON.stringify({
@@ -345,6 +346,161 @@ class NostrService {
       return publishedEvent;
     } catch (error) {
       console.error('Error creating private group:', error);
+      throw error;
+    }
+  }
+
+  // NEW: Create real encrypted private group with shared secret
+  async createRealEncryptedGroup(name, about, picture = '', initialMemberPubkeys = []) {
+    try {
+      console.log('🔐 Creating REAL encrypted private group with shared secret...');
+      
+      // Use GroupEncryptionService to create encrypted group
+      const groupData = await groupEncryptionService.createEncryptedGroup(
+        name, 
+        about, 
+        picture, 
+        initialMemberPubkeys
+      );
+      
+      // Set up encryption service reference
+      groupEncryptionService.publicKey = this.publicKey;
+      
+      // Publish the group creation event
+      const publishedGroupEvent = await this.publishEvent(groupData.groupEvent);
+      
+      // Distribute group key to initial members
+      if (initialMemberPubkeys.length > 0) {
+        console.log(`🔑 Distributing group key to ${initialMemberPubkeys.length} members...`);
+        
+        const keyDistribution = await groupEncryptionService.distributeGroupKey(
+          groupData.groupId,
+          groupData.groupKey,
+          groupData.keyVersion,
+          initialMemberPubkeys,
+          this // Pass NostrService instance
+        );
+        
+        // Publish key distribution DMs
+        for (const distribution of keyDistribution) {
+          if (distribution.success) {
+            try {
+              await this.publishEvent(distribution.keyEvent);
+              console.log(`✅ Key sent to ${distribution.member.substring(0, 8)}...`);
+            } catch (error) {
+              console.error(`❌ Failed to send key to ${distribution.member}:`, error);
+            }
+          }
+        }
+      }
+      
+      console.log(`✅ Real encrypted group created: ${groupData.groupId}`);
+      
+      return {
+        ...publishedGroupEvent,
+        groupId: groupData.groupId,
+        encrypted: true,
+        keyVersion: groupData.keyVersion
+      };
+      
+    } catch (error) {
+      console.error('Error creating real encrypted group:', error);
+      throw error;
+    }
+  }
+
+  // NEW: Send encrypted message to encrypted group
+  async sendEncryptedGroupMessage(groupId, message, replyTo = null) {
+    try {
+      console.log(`🔐 Sending encrypted message to group ${groupId}...`);
+      
+      // Create encrypted message using GroupEncryptionService
+      const encryptedEvent = await groupEncryptionService.createEncryptedGroupMessage(
+        groupId,
+        message,
+        replyTo
+      );
+      
+      // Publish encrypted message
+      const publishedEvent = await this.publishEvent(encryptedEvent);
+      
+      console.log('✅ Encrypted message sent successfully');
+      return publishedEvent;
+      
+    } catch (error) {
+      console.error('Error sending encrypted group message:', error);
+      throw error;
+    }
+  }
+
+  // NEW: Add member to encrypted group (triggers key rotation)
+  async addMemberToEncryptedGroup(groupId, newMemberPubkey) {
+    try {
+      console.log(`👥 Adding member to encrypted group ${groupId}...`);
+      
+      // Get current group members (would need to be tracked)
+      const currentMembers = await this.getGroupMembers(groupId);
+      const newMembers = [...currentMembers, newMemberPubkey];
+      
+      // Rotate group key for forward secrecy
+      const keyRotation = await groupEncryptionService.rotateGroupKey(
+        groupId,
+        newMembers,
+        [], // no removed members
+        this
+      );
+      
+      // Publish key rotation event
+      await this.publishEvent(keyRotation.rotationEvent);
+      
+      // Send new keys to all members
+      for (const distribution of keyRotation.keyDistribution) {
+        if (distribution.success) {
+          await this.publishEvent(distribution.keyEvent);
+        }
+      }
+      
+      console.log(`✅ Member added and keys rotated`);
+      return keyRotation;
+      
+    } catch (error) {
+      console.error('Error adding member to encrypted group:', error);
+      throw error;
+    }
+  }
+
+  // NEW: Remove member from encrypted group (triggers key rotation)
+  async removeMemberFromEncryptedGroup(groupId, removeMemberPubkey) {
+    try {
+      console.log(`👥 Removing member from encrypted group ${groupId}...`);
+      
+      // Get current group members
+      const currentMembers = await this.getGroupMembers(groupId);
+      const newMembers = currentMembers.filter(m => m !== removeMemberPubkey);
+      
+      // Rotate group key for backward secrecy
+      const keyRotation = await groupEncryptionService.rotateGroupKey(
+        groupId,
+        newMembers,
+        [removeMemberPubkey],
+        this
+      );
+      
+      // Publish key rotation event
+      await this.publishEvent(keyRotation.rotationEvent);
+      
+      // Send new keys to remaining members
+      for (const distribution of keyRotation.keyDistribution) {
+        if (distribution.success) {
+          await this.publishEvent(distribution.keyEvent);
+        }
+      }
+      
+      console.log(`✅ Member removed and keys rotated`);
+      return keyRotation;
+      
+    } catch (error) {
+      console.error('Error removing member from encrypted group:', error);
       throw error;
     }
   }
@@ -380,16 +536,27 @@ class NostrService {
     try {
       console.log(`📨 Inviting ${inviteePubkey.substring(0, 8)}... to private group ${groupId.substring(0, 8)}...`);
       
-      // Create invitation event using NIP-17 approach
+      // Try to get the group name by querying for the group creation event
+      let groupName = null;
+      try {
+        const channels = await this.queryChannels(200);
+        const group = channels.find(c => c.id === groupId);
+        groupName = group?.name || null;
+      } catch (error) {
+        console.warn('Could not fetch group name for invitation:', error);
+      }
+      
+      // Create invitation event using basic approach (not real NIP-17)
       const invitationContent = JSON.stringify({
         type: 'private_group_invitation',
         group_id: groupId,
+        group_name: groupName,
         invited_by: this.publicKey,
         message: personalMessage,
         timestamp: Math.floor(Date.now() / 1000)
       });
 
-      // Encrypt the invitation using NIP-04 (will upgrade to NIP-17 later)
+      // Encrypt the invitation using NIP-04 (basic encryption for invites only)
       const encryptedContent = await nip04.encrypt(this.privateKey, inviteePubkey, invitationContent);
 
       const inviteEvent = {
@@ -445,6 +612,129 @@ class NostrService {
       console.error('Error accepting private group invitation:', error);
       throw error;
     }
+  }
+
+  // NIP-29 Group Creation
+  async createNIP29Group(name, about, picture = '') {
+    try {
+      console.log('🏛️ Creating NIP-29 managed group...');
+      
+      // Get NIP-29 relays from storage
+      const nip29RelaysStored = await AsyncStorage.getItem('nip29_relays');
+      const nip29Relays = nip29RelaysStored ? JSON.parse(nip29RelaysStored) : ['wss://relay.groups.nip29.com'];
+      
+      if (nip29Relays.length === 0) {
+        throw new Error('No NIP-29 relays configured. Please add a NIP-29 relay in settings.');
+      }
+      
+      // Generate a random group ID for NIP-29
+      const groupId = this.generateRandomGroupId();
+      
+      // Create the group creation event for NIP-29
+      const groupEvent = {
+        kind: 9007, // NIP-29 create-group event
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['d', groupId], // group identifier
+          ['name', name],
+          ['about', about],
+          ['picture', picture],
+          ['privacy', 'private'],
+          ['type', 'closed'] // requires approval to join
+        ],
+        content: JSON.stringify({
+          name,
+          about,
+          picture,
+          privacy: 'private',
+          type: 'closed',
+          created_by: this.publicKey
+        })
+        // Note: pubkey will be added by finalizeEvent
+      };
+
+      // Convert private key to proper format for finalizeEvent
+      if (!this.privateKey) {
+        throw new Error('No private key available for signing');
+      }
+      
+      const privateKeyBytes = new Uint8Array(
+        this.privateKey.match(/.{1,2}/g).map(byte => parseInt(byte, 16))
+      );
+      
+      // Sign the event properly
+      const signedGroupEvent = finalizeEvent(groupEvent, privateKeyBytes);
+
+      // Publish to NIP-29 relays specifically
+      let publishedEvent = null;
+      let publishSuccess = false;
+      
+      for (const relay of nip29Relays) {
+        try {
+          console.log(`📡 Publishing NIP-29 group to relay: ${relay}`);
+          
+          // Create a temporary pool for this specific relay
+          const tempPool = new SimplePool();
+          publishedEvent = await tempPool.publish([relay], signedGroupEvent);
+          
+          if (publishedEvent) {
+            console.log(`✅ NIP-29 group published to ${relay}`);
+            publishSuccess = true;
+            break; // Success on first relay
+          }
+        } catch (relayError) {
+          console.warn(`⚠️ Failed to publish to ${relay}:`, relayError.message);
+          continue; // Try next relay
+        }
+      }
+      
+      if (!publishSuccess) {
+        throw new Error('Failed to create group on any NIP-29 relay. Please check your NIP-29 relay connections.');
+      }
+      
+      // Store the group info locally with NIP-29 metadata
+      const groupInfo = {
+        id: publishedEvent.id,
+        groupId: groupId,
+        name,
+        about,
+        picture,
+        protocol: 'nip29',
+        created_by: this.publicKey,
+        created_at: Math.floor(Date.now() / 1000),
+        relays: nip29Relays,
+        privacy: 'private',
+        type: 'closed'
+      };
+      
+      // Cache the group using generic cache method
+      try {
+        await cacheService.set(`channel_info_${publishedEvent.id}`, groupInfo);
+        console.log('💾 Cached NIP-29 group info');
+      } catch (cacheError) {
+        console.warn('⚠️ Failed to cache group info:', cacheError.message);
+        // Don't fail group creation if caching fails
+      }
+      
+      console.log('✅ NIP-29 group created successfully:', publishedEvent.id);
+      console.log('🆔 Group ID:', groupId);
+      
+      return publishedEvent;
+      
+    } catch (error) {
+      console.error('Error creating NIP-29 group:', error);
+      throw error;
+    }
+  }
+
+  generateRandomGroupId() {
+    // Generate a random group ID following NIP-29 spec (a-z0-9-_)
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789-_';
+    let result = '';
+    for (let i = 0; i < 16; i++) {
+      result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
   }
 
   async getPrivateGroupMembers(groupId) {
@@ -585,12 +875,40 @@ class NostrService {
   subscribeToChannel(channelId, onMessage, onMetadata, onModeration) {
     const filters = nostrUtils.createChannelSubscription(channelId);
     
-    return this.subscribe(filters, (event) => {
+    return this.subscribe(filters, async (event) => {
       switch (event.kind) {
         case EVENT_KINDS.CHANNEL_MESSAGE:
           if (onMessage) {
-            const message = nostrUtils.parseChannelMessage(event);
-            onMessage(message);
+            // Check if this is an encrypted message
+            if (groupEncryptionService.isEncryptedMessage(event)) {
+              try {
+                console.log('🔓 Decrypting encrypted group message...');
+                const decryptedMessage = await groupEncryptionService.decryptGroupMessage(event, channelId);
+                
+                if (decryptedMessage) {
+                  onMessage(decryptedMessage);
+                } else {
+                  console.warn('Failed to decrypt message - might not have group key');
+                  // Still show the message but indicate decryption failed
+                  const failedMessage = nostrUtils.parseChannelMessage(event);
+                  failedMessage.content = '[🔒 Encrypted message - no access]';
+                  failedMessage.encrypted = true;
+                  failedMessage.decryption_failed = true;
+                  onMessage(failedMessage);
+                }
+              } catch (error) {
+                console.error('Error decrypting message:', error);
+                const failedMessage = nostrUtils.parseChannelMessage(event);
+                failedMessage.content = '[🔒 Decryption failed]';
+                failedMessage.encrypted = true;
+                failedMessage.decryption_failed = true;
+                onMessage(failedMessage);
+              }
+            } else {
+              // Regular unencrypted message
+              const message = nostrUtils.parseChannelMessage(event);
+              onMessage(message);
+            }
           }
           break;
           
@@ -617,24 +935,47 @@ class NostrService {
   subscribeToDirectMessages(onMessage) {
     const filters = nostrUtils.createDirectMessageSubscription(this.publicKey);
     
-    return this.subscribe(filters, (event) => {
+    return this.subscribe(filters, async (event) => {
       if (event.kind === EVENT_KINDS.ENCRYPTED_DM) {
         try {
-          const decryptedContent = nostrUtils.decryptDirectMessage(
-            event, 
-            this.privateKey
-          );
+          // Check if this is a group key share
+          const isGroupKeyShare = event.tags.some(tag => tag[0] === 'group_key_share');
           
-          if (decryptedContent && onMessage) {
-            onMessage({
-              id: event.id,
-              content: decryptedContent,
-              sender: event.pubkey,
-              timestamp: event.created_at
-            });
+          if (isGroupKeyShare) {
+            console.log('🔑 Received group key share DM');
+            const processed = await groupEncryptionService.processGroupKeyShare(event, this);
+            
+            if (processed) {
+              console.log('✅ Group key share processed successfully');
+              // Optionally notify user about new group access
+              if (onMessage) {
+                onMessage({
+                  id: event.id,
+                  content: '[🔑 You were added to an encrypted group]',
+                  sender: event.pubkey,
+                  timestamp: event.created_at,
+                  type: 'group_key_share'
+                });
+              }
+            }
+          } else {
+            // Regular encrypted DM
+            const decryptedContent = nostrUtils.decryptDirectMessage(
+              event, 
+              this.privateKey
+            );
+            
+            if (decryptedContent && onMessage) {
+              onMessage({
+                id: event.id,
+                content: decryptedContent,
+                sender: event.pubkey,
+                timestamp: event.created_at
+              });
+            }
           }
         } catch (error) {
-          console.error('Error decrypting direct message:', error);
+          console.error('Error processing direct message:', error);
         }
       }
     });
@@ -1023,7 +1364,16 @@ class NostrService {
     try {
       const timestamps = await AsyncStorage.getItem(STORAGE_KEYS.DM_LAST_READ_TIMESTAMPS);
       const readTimestamps = timestamps ? JSON.parse(timestamps) : {};
-      return readTimestamps[contactPubkey] || 0;
+      const timestamp = readTimestamps[contactPubkey] || 0;
+      
+      console.log(`🔍 Getting read timestamp for ${contactPubkey.substring(0, 8)}... = ${timestamp}`);
+      if (timestamp === 0) {
+        console.log(`📊 All stored timestamps:`, Object.keys(readTimestamps).map(key => 
+          `${key.substring(0, 8)}...=${readTimestamps[key]}`
+        ));
+      }
+      
+      return timestamp;
     } catch (error) {
       console.error('Error getting last read timestamp:', error);
       return 0;
@@ -1032,50 +1382,159 @@ class NostrService {
 
   async setLastReadTimestamp(contactPubkey, timestamp) {
     try {
+      console.log(`💾 Setting read timestamp for ${contactPubkey.substring(0, 8)}... to ${timestamp}`);
       const timestamps = await AsyncStorage.getItem(STORAGE_KEYS.DM_LAST_READ_TIMESTAMPS);
       const readTimestamps = timestamps ? JSON.parse(timestamps) : {};
       readTimestamps[contactPubkey] = timestamp;
       await AsyncStorage.setItem(STORAGE_KEYS.DM_LAST_READ_TIMESTAMPS, JSON.stringify(readTimestamps));
+      
+      // Verify the write was successful by reading it back
+      const verification = await AsyncStorage.getItem(STORAGE_KEYS.DM_LAST_READ_TIMESTAMPS);
+      const verifiedTimestamps = verification ? JSON.parse(verification) : {};
+      const verifiedTimestamp = verifiedTimestamps[contactPubkey];
+      
+      if (verifiedTimestamp === timestamp) {
+        console.log(`✅ Successfully saved and verified read timestamp for ${contactPubkey.substring(0, 8)}...`);
+      } else {
+        console.error(`❌ Verification failed! Expected ${timestamp}, got ${verifiedTimestamp} for ${contactPubkey.substring(0, 8)}...`);
+        throw new Error(`AsyncStorage write verification failed for ${contactPubkey.substring(0, 8)}...`);
+      }
     } catch (error) {
-      console.error('Error setting last read timestamp:', error);
+      console.error(`❌ Error setting last read timestamp for ${contactPubkey.substring(0, 8)}...:`, error);
+      throw error; // Re-throw to ensure Promise.all catches failures
     }
   }
 
   async markConversationAsRead(contactPubkey) {
+    // FIRST: Invalidate cache to ensure fresh data on next load
+    const cacheKey = `cache_conversations_${this.publicKey}`;
+    cacheService.memoryCache.delete(cacheKey);
+    await AsyncStorage.removeItem(cacheKey);
+    
+    // THEN: Update timestamp
     const currentTimestamp = Math.floor(Date.now() / 1000);
     await this.setLastReadTimestamp(contactPubkey, currentTimestamp);
-    
-    // Update cache to reflect read status
-    await cacheService.markConversationAsRead(this.publicKey, contactPubkey);
     
     console.log(`✅ Marked conversation as read: ${contactPubkey.substring(0, 8)}...`);
   }
 
   async markAllConversationsAsRead() {
     try {
+      console.log('🔄 Starting markAllConversationsAsRead...');
+      
       if (!this.publicKey) {
         throw new Error('No public key available');
       }
 
-      // Get all conversations to mark them as read
-      const conversations = await this.getPrivateConversations();
+      // Get all conversations to mark them as read - use cached version to avoid recalculation
+      const cachedConversations = await cacheService.getConversations(this.publicKey);
+      if (!cachedConversations || cachedConversations.length === 0) {
+        console.log('⚠️ No conversations found to mark as read');
+        return 0;
+      }
+      
+      console.log(`📝 Found ${cachedConversations.length} conversations to mark as read`);
       const currentTimestamp = Math.floor(Date.now() / 1000);
       
-      // Update timestamps for all conversations
-      const updatePromises = conversations.map(conv => 
-        this.setLastReadTimestamp(conv.pubkey, currentTimestamp)
-      );
+      // Log current read timestamps before updating
+      console.log('📊 Current read timestamps before marking all as read:');
+      for (const conv of cachedConversations) {
+        const currentReadTimestamp = await this.getLastReadTimestamp(conv.pubkey);
+        console.log(`  ${conv.pubkey.substring(0, 8)}... = ${currentReadTimestamp} (unread: ${conv.unreadCount})`);
+      }
       
-      await Promise.all(updatePromises);
+      // Update timestamps for all conversations sequentially to avoid race conditions
+      console.log(`🔄 Updating all timestamps to ${currentTimestamp}...`);
+      let successCount = 0;
+      for (const conv of cachedConversations) {
+        console.log(`📌 Marking conversation ${conv.pubkey.substring(0, 8)}... as read`);
+        try {
+          await this.setLastReadTimestamp(conv.pubkey, currentTimestamp);
+          successCount++;
+          console.log(`✅ Timestamp saved for ${conv.pubkey.substring(0, 8)}... (${successCount}/${cachedConversations.length})`);
+        } catch (error) {
+          console.error(`❌ Failed to save timestamp for ${conv.pubkey.substring(0, 8)}...:`, error);
+          throw error;
+        }
+      }
+      console.log(`✅ Successfully updated ${successCount}/${cachedConversations.length} read timestamps`);
       
-      // Update cache to reflect all read
-      await cacheService.markAllConversationsAsRead(this.publicKey);
+      // Verify all timestamps were saved correctly
+      console.log('🔍 Verifying all timestamps were saved correctly...');
+      for (const conv of cachedConversations) {
+        const verifiedTimestamp = await this.getLastReadTimestamp(conv.pubkey);
+        if (verifiedTimestamp !== currentTimestamp) {
+          console.error(`❌ Verification failed for ${conv.pubkey.substring(0, 8)}...: expected ${currentTimestamp}, got ${verifiedTimestamp}`);
+          throw new Error(`Timestamp verification failed for ${conv.pubkey.substring(0, 8)}...`);
+        }
+      }
+      console.log('✅ All timestamps verified successfully');
       
-      console.log(`✅ Marked all ${conversations.length} conversations as read`);
-      return conversations.length;
+      // Update the cached conversations with unreadCount: 0 instead of invalidating
+      const updatedConversations = cachedConversations.map(conv => ({
+        ...conv,
+        unreadCount: 0
+      }));
+      
+      await cacheService.setConversations(this.publicKey, updatedConversations);
+      console.log('💾 Updated conversations cache with read status');
+      
+      console.log(`✅ Marked all ${cachedConversations.length} conversations as read`);
+      return cachedConversations.length;
     } catch (error) {
-      console.error('Error marking all conversations as read:', error);
+      console.error('❌ Error marking all conversations as read:', error);
       throw error;
+    }
+  }
+
+  async updateConversationCacheWithNewMessage(newMessage, contactPubkey) {
+    try {
+      // Get current conversations from cache
+      const conversations = await cacheService.getConversations(this.publicKey);
+      if (!conversations) return;
+
+      // Get current read timestamp for this contact
+      const lastReadTimestamp = await this.getLastReadTimestamp(contactPubkey);
+
+      const updatedConversations = conversations.map(conv => {
+        if (conv.pubkey === contactPubkey) {
+          const updatedMessages = [...(conv.messages || []), newMessage];
+          
+          // Calculate proper unread count based on read timestamp
+          const unreadCount = updatedMessages.filter(msg => 
+            !msg.isFromMe && msg.timestamp > lastReadTimestamp
+          ).length;
+
+          return {
+            ...conv,
+            lastMessage: newMessage,
+            messages: updatedMessages,
+            unreadCount: unreadCount
+          };
+        }
+        return conv;
+      });
+
+      // Sort by last message timestamp
+      updatedConversations.sort((a, b) => {
+        const aTime = a.lastMessage ? a.lastMessage.timestamp : 0;
+        const bTime = b.lastMessage ? b.lastMessage.timestamp : 0;
+        return bTime - aTime;
+      });
+
+      // Update conversation cache
+      await cacheService.setConversations(this.publicKey, updatedConversations);
+
+      // Also update the specific conversation messages cache
+      const messages = await cacheService.getPrivateMessages(this.publicKey, contactPubkey);
+      if (messages) {
+        const updatedMessages = [...messages, newMessage];
+        await cacheService.setPrivateMessages(this.publicKey, contactPubkey, updatedMessages);
+      }
+
+      console.log(`🔄 Updated conversation cache for ${contactPubkey.substring(0, 8)}... with proper unread count`);
+    } catch (error) {
+      console.warn('Error updating conversation cache with new message:', error);
     }
   }
 
@@ -1112,8 +1571,8 @@ class NostrService {
         isFromMe: true
       };
 
-      // Update cache with new message (for real-time updates)
-      await cacheService.updateConversationWithNewMessage(this.publicKey, newMessage, recipientPubkey);
+      // Update cache with new message (for real-time updates with proper unread count)
+      await this.updateConversationCacheWithNewMessage(newMessage, recipientPubkey);
       
       console.log('Private message sent and cached:', recipientPubkey.substring(0, 8) + '...');
       return signedEvent;
@@ -1133,6 +1592,23 @@ class NostrService {
       const cachedConversations = await cacheService.getConversations(this.publicKey);
       if (cachedConversations) {
         console.log(`💾 Conversations cache hit (${cachedConversations.length} conversations)`);
+        
+        // Recalculate unread counts with current read timestamps
+        for (const conv of cachedConversations) {
+          const lastReadTimestamp = await this.getLastReadTimestamp(conv.pubkey);
+          const unreadMessages = conv.messages?.filter(msg => 
+            !msg.isFromMe && msg.timestamp > lastReadTimestamp
+          ) || [];
+          
+          console.log(`📊 Conversation ${conv.pubkey.substring(0, 8)}... - Read timestamp: ${lastReadTimestamp}, Unread: ${unreadMessages.length}`);
+          if (unreadMessages.length > 0) {
+            console.log(`📝 Latest unread message timestamp: ${Math.max(...unreadMessages.map(m => m.timestamp))}`);
+          }
+          
+          conv.unreadCount = unreadMessages.length;
+        }
+        
+        console.log(`🔄 Updated unread counts for cached conversations`);
         return cachedConversations;
       }
 
@@ -1213,9 +1689,18 @@ class NostrService {
         const lastReadTimestamp = await this.getLastReadTimestamp(conv.pubkey);
         
         // Count messages from others that are newer than last read timestamp
-        conv.unreadCount = conv.messages.filter(msg => 
+        const unreadMessages = conv.messages.filter(msg => 
           !msg.isFromMe && msg.timestamp > lastReadTimestamp
-        ).length;
+        );
+        conv.unreadCount = unreadMessages.length;
+        
+        // Debug logging for unread count calculation
+        if (conv.unreadCount > 0) {
+          console.log(`📧 ${conv.pubkey.substring(0, 8)}... has ${conv.unreadCount} unread messages (lastRead: ${lastReadTimestamp})`);
+          unreadMessages.forEach(msg => {
+            console.log(`  📩 Unread message from ${msg.timestamp}: ${msg.content?.substring(0, 30)}...`);
+          });
+        }
         
         conversationsList.push(conv);
       }
@@ -1665,8 +2150,20 @@ class NostrService {
         try {
           console.log(`💬 New private message received from ${event.pubkey.substring(0, 8)}...`);
           
+          // Check if this is a group invitation by looking at tags
+          const isGroupInvitation = event.tags?.some(tag => 
+            (tag[0] === 'invitation' && tag[1] === 'true') ||
+            tag[0] === 'group_invite'
+          );
+          
           // Decrypt the message
           const decryptedContent = await nip04.decrypt(this.privateKey, event.pubkey, event.content);
+          
+          // Handle group invitations separately
+          if (isGroupInvitation) {
+            await this.handleGroupInvitation(event, decryptedContent);
+            return; // Don't process as regular DM
+          }
           
           const newMessage = {
             id: event.id,
@@ -1677,8 +2174,8 @@ class NostrService {
             isFromMe: false
           };
           
-          // Update cache with new message for real-time updates
-          await cacheService.updateConversationWithNewMessage(this.publicKey, newMessage, event.pubkey);
+          // Update cache with new message for real-time updates (with proper unread count)
+          await this.updateConversationCacheWithNewMessage(newMessage, event.pubkey);
           
           onNewMessage(newMessage, event.pubkey);
         } catch (decryptError) {
@@ -1692,6 +2189,98 @@ class NostrService {
 
     this.subscriptions.set(subscriptionId, subscription);
     return subscriptionId;
+  }
+
+  async handleGroupInvitation(event, decryptedContent) {
+    try {
+      console.log(`📨 Handling group invitation from ${event.pubkey.substring(0, 8)}...`);
+      
+      // Parse the invitation content
+      let invitationData;
+      try {
+        invitationData = JSON.parse(decryptedContent);
+      } catch (parseError) {
+        console.warn('Failed to parse group invitation JSON:', parseError);
+        return;
+      }
+      
+      // Validate invitation data
+      if (invitationData.type !== 'private_group_invitation' || !invitationData.group_id) {
+        console.warn('Invalid group invitation format');
+        return;
+      }
+      
+      console.log(`🔔 Group invitation received for group: ${invitationData.group_id.substring(0, 8)}...`);
+      
+      // Get inviter's profile for the notification
+      const inviterProfile = await this.getUserProfile(event.pubkey);
+      const inviterName = inviterProfile?.display_name || 
+                         inviterProfile?.name || 
+                         inviterProfile?.username || 
+                         `${event.pubkey.substring(0, 8)}...`;
+      
+      // Try to get the group name (this might not work if we're not a member yet)
+      const groupName = invitationData.group_name || 
+                       `Group ${invitationData.group_id.substring(0, 8)}...`;
+      
+      // Import notification service dynamically to avoid circular imports
+      const { notificationService } = await import('./NotificationService');
+      
+      // Show notification
+      notificationService.notifyInvitation(groupName, inviterName);
+      
+      // Store the invitation for later processing (optional)
+      await this.storeGroupInvitation({
+        id: event.id,
+        groupId: invitationData.group_id,
+        inviterPubkey: event.pubkey,
+        inviterName,
+        groupName,
+        message: invitationData.message || '',
+        timestamp: event.created_at,
+        status: 'pending'
+      });
+      
+      console.log(`✅ Group invitation processed and notification shown`);
+    } catch (error) {
+      console.error('Error handling group invitation:', error);
+    }
+  }
+
+  async storeGroupInvitation(invitation) {
+    try {
+      // Store invitation in AsyncStorage for later access
+      const invitationsKey = `group_invitations_${this.publicKey}`;
+      const existingInvitations = await AsyncStorage.getItem(invitationsKey);
+      let invitations = existingInvitations ? JSON.parse(existingInvitations) : [];
+      
+      // Check if invitation already exists
+      const existingIndex = invitations.findIndex(inv => inv.id === invitation.id);
+      if (existingIndex >= 0) {
+        invitations[existingIndex] = invitation; // Update existing
+      } else {
+        invitations.push(invitation); // Add new
+      }
+      
+      // Keep only last 50 invitations
+      invitations = invitations.slice(-50);
+      
+      await AsyncStorage.setItem(invitationsKey, JSON.stringify(invitations));
+      console.log(`💾 Stored group invitation: ${invitation.groupName}`);
+    } catch (error) {
+      console.error('Error storing group invitation:', error);
+    }
+  }
+
+  async getGroupInvitations() {
+    try {
+      const invitationsKey = `group_invitations_${this.publicKey}`;
+      const storedInvitations = await AsyncStorage.getItem(invitationsKey);
+      return storedInvitations ? JSON.parse(storedInvitations) : [];
+    } catch (error) {
+      console.error('Error getting group invitations:', error);
+      return [];
+    }
   }
 
   // Fetch posts by note IDs or event IDs for nostr references
@@ -1874,6 +2463,10 @@ class NostrService {
 
       console.log('📝 Publishing delete event:', deleteEvent);
       const signedEvent = await this.publishEvent(deleteEvent);
+      
+      // Invalidate interaction caches
+      await this.invalidateInteractionCaches(postId);
+      
       console.log('✅ Unlike event published successfully:', signedEvent.id);
       return signedEvent;
     } catch (error) {
@@ -1902,6 +2495,14 @@ class NostrService {
       };
 
       const signedEvent = await this.publishEvent(repostEvent);
+      
+      // Invalidate interaction caches and user's repost cache
+      await Promise.all([
+        this.invalidateInteractionCaches(postId),
+        this.invalidateUserCaches(this.publicKey), // User's own reposts
+        this.invalidateFeedCaches(), // Reposts might appear in feeds
+      ]);
+      
       console.log('Repost event published:', signedEvent.id);
       return signedEvent;
     } catch (error) {
@@ -1934,6 +2535,14 @@ class NostrService {
       };
 
       const signedEvent = await this.publishEvent(replyEvent);
+      
+      // Invalidate interaction caches and user's post cache
+      await Promise.all([
+        this.invalidateInteractionCaches(postId), // Original post's reply count
+        this.invalidateUserCaches(this.publicKey), // User's own posts (replies)
+        this.invalidateFeedCaches(), // Replies might appear in feeds
+      ]);
+      
       console.log('Reply event published:', signedEvent.id);
       return signedEvent;
     } catch (error) {
@@ -2165,11 +2774,115 @@ class NostrService {
     }
   }
 
+  // Follow/Unfollow methods
+  async followUser(targetPubkey) {
+    try {
+      if (!this.privateKey) {
+        throw new Error('No private key available for following users');
+      }
+
+      console.log(`👤 Following user ${targetPubkey.substring(0, 8)}...`);
+
+      // Get current following list (using cache first, then network)
+      const currentFollowing = await this.getUserContacts(this.publicKey);
+      
+      // Check if already following
+      if (currentFollowing.includes(targetPubkey)) {
+        console.log('Already following this user');
+        return;
+      }
+
+      // Add user to following list
+      const updatedFollowing = [...currentFollowing, targetPubkey];
+      
+      // Create contact list event (kind 3)
+      const contactEvent = {
+        kind: 3, // Contact list
+        created_at: Math.floor(Date.now() / 1000),
+        tags: updatedFollowing.map(pubkey => ['p', pubkey]),
+        content: '', // Content can contain relay recommendations but we'll keep it simple
+      };
+
+      const signedEvent = await this.publishEvent(contactEvent);
+      
+      // Invalidate caches AFTER successful operation
+      await Promise.all([
+        cacheService.invalidateFollowing(this.publicKey), // Current user's following
+        cacheService.invalidateFollowers(targetPubkey),   // Target user's followers
+      ]);
+      
+      console.log(`✅ Successfully followed user and invalidated caches`);
+      return signedEvent;
+    } catch (error) {
+      console.error('Error following user:', error);
+      throw error;
+    }
+  }
+
+  async unfollowUser(targetPubkey) {
+    try {
+      if (!this.privateKey) {
+        throw new Error('No private key available for unfollowing users');
+      }
+
+      console.log(`👤 Unfollowing user ${targetPubkey.substring(0, 8)}...`);
+      
+      // Get current following list (using cache first, then network)
+      const currentFollowing = await this.getUserContacts(this.publicKey);
+      
+      // Check if not following
+      if (!currentFollowing.includes(targetPubkey)) {
+        console.log('Not following this user');
+        return;
+      }
+
+      // Remove user from following list
+      const updatedFollowing = currentFollowing.filter(pubkey => pubkey !== targetPubkey);
+      
+      // Create contact list event (kind 3)
+      const contactEvent = {
+        kind: 3, // Contact list
+        created_at: Math.floor(Date.now() / 1000),
+        tags: updatedFollowing.map(pubkey => ['p', pubkey]),
+        content: '', // Content can contain relay recommendations but we'll keep it simple
+      };
+
+      const signedEvent = await this.publishEvent(contactEvent);
+      
+      // Invalidate caches AFTER successful operation
+      await Promise.all([
+        cacheService.invalidateFollowing(this.publicKey), // Current user's following
+        cacheService.invalidateFollowers(targetPubkey),   // Target user's followers
+      ]);
+      
+      console.log(`✅ Successfully unfollowed user and invalidated caches`);
+      return signedEvent;
+    } catch (error) {
+      console.error('Error unfollowing user:', error);
+      throw error;
+    }
+  }
+
   // Cache invalidation helper methods
   async invalidateInteractionCaches(postId) {
     try {
-      // This method is called when interactions change (likes, reposts, etc.)
-      // We can add specific interaction cache invalidation here if needed
+      // Invalidate all caches related to interactions
+      const interactionCacheKey = `cache_interactions_${postId}`;
+      const userLikesCacheKey = 'cache_user_likes';
+      const userRepostsCacheKey = 'cache_user_reposts';
+      
+      // Remove from memory cache
+      cacheService.memoryCache.delete(interactionCacheKey);
+      cacheService.memoryCache.delete(userLikesCacheKey);
+      cacheService.memoryCache.delete(userRepostsCacheKey);
+      
+      // Remove from AsyncStorage
+      await Promise.all([
+        AsyncStorage.removeItem(interactionCacheKey),
+        AsyncStorage.removeItem(userLikesCacheKey),
+        AsyncStorage.removeItem(userRepostsCacheKey),
+      ]);
+      
       console.log(`🗑️ Invalidated interaction caches for post ${postId}`);
     } catch (error) {
       console.warn('Error invalidating interaction caches:', error);
@@ -2195,6 +2908,276 @@ class NostrService {
       console.log('🗑️ Invalidated feed caches');
     } catch (error) {
       console.warn('Error invalidating feed caches:', error);
+    }
+  }
+
+  // NIP-29 Group Query Methods
+  async queryNIP29Groups(limit = 50) {
+    try {
+      console.log('🏛️ ==> QUERYING NIP-29 GROUPS FROM RELAYS...');
+      
+      // Get NIP-29 relays from storage
+      const nip29RelaysStored = await AsyncStorage.getItem('nip29_relays');
+      const nip29Relays = nip29RelaysStored ? JSON.parse(nip29RelaysStored) : ['wss://relay.groups.nip29.com'];
+      
+      console.log('💾 NIP-29 relays from storage:', nip29RelaysStored);
+      console.log('🔗 Using NIP-29 relays:', nip29Relays);
+      
+      if (nip29Relays.length === 0) {
+        console.log('❌ No NIP-29 relays configured, returning empty array');
+        return [];
+      }
+      
+      // Check if we have a private key (needed to see our own groups)
+      if (!this.publicKey) {
+        console.log('❌ No public key available, cannot query NIP-29 groups');
+        return [];
+      }
+      
+      console.log('🔑 Using public key:', this.publicKey.substring(0, 16) + '...');
+      
+      return new Promise((resolve) => {
+        const groups = [];
+        let timeoutId;
+        
+        // Query for NIP-29 groups created by the current user
+        const filters = {
+          kinds: [9007], // NIP-29 group creation events
+          authors: [this.publicKey], // Only groups created by current user
+          limit: limit
+        };
+        
+        console.log('🔍 NIP-29 query filters:', filters);
+        console.log('📡 Connecting to NIP-29 relays for subscription...');
+        
+        const subscription = this.pool.subscribeMany(
+          nip29Relays,
+          [filters],
+          {
+            onevent: (event) => {
+              try {
+                console.log('🎉 ==> FOUND NIP-29 GROUP EVENT!');
+                console.log('   Event ID:', event.id.substring(0, 16) + '...');
+                console.log('   Event Kind:', event.kind);
+                console.log('   Event Author:', event.pubkey.substring(0, 16) + '...');
+                console.log('   Event Tags:', event.tags);
+                console.log('   Event Content:', event.content?.substring(0, 100) + '...');
+                
+                // Parse NIP-29 group event
+                const groupData = {
+                  id: event.id,
+                  kind: event.kind,
+                  name: '',
+                  about: '',
+                  picture: '',
+                  creator: event.pubkey,
+                  created_at: event.created_at,
+                  tags: event.tags || [],
+                  protocol: 'nip29',
+                  privacy: 'private'
+                };
+                
+                // Extract group info from tags
+                if (event.tags) {
+                  event.tags.forEach(tag => {
+                    if (tag[0] === 'name' && tag[1]) groupData.name = tag[1];
+                    if (tag[0] === 'about' && tag[1]) groupData.about = tag[1];
+                    if (tag[0] === 'picture' && tag[1]) groupData.picture = tag[1];
+                    if (tag[0] === 'd' && tag[1]) groupData.groupId = tag[1];
+                  });
+                }
+                
+                // Also try to parse from content if available
+                if (event.content) {
+                  try {
+                    const contentData = JSON.parse(event.content);
+                    if (contentData.name && !groupData.name) groupData.name = contentData.name;
+                    if (contentData.about && !groupData.about) groupData.about = contentData.about;
+                    if (contentData.picture && !groupData.picture) groupData.picture = contentData.picture;
+                  } catch (parseError) {
+                    // Content is not JSON, ignore
+                  }
+                }
+                
+                // Set fallback name if none found
+                if (!groupData.name) {
+                  groupData.name = `NIP-29 Group ${event.id.substring(0, 8)}`;
+                }
+                
+                console.log('✅ ==> SUCCESSFULLY PARSED NIP-29 GROUP:');
+                console.log('   Name:', groupData.name);
+                console.log('   About:', groupData.about);
+                console.log('   Protocol:', groupData.protocol);
+                console.log('   Privacy:', groupData.privacy);
+                console.log('   Group ID:', groupData.groupId);
+                
+                groups.push(groupData);
+                
+              } catch (error) {
+                console.error('Error processing NIP-29 group event:', error);
+              }
+            },
+            oneose: () => {
+              console.log('📨 ==> END OF STORED NIP-29 GROUPS');
+              console.log('📅 Total NIP-29 groups found:', groups.length);
+              if (timeoutId) {
+                clearTimeout(timeoutId);
+              }
+              subscription.close();
+              console.log('🎆 ==> RETURNING', groups.length, 'NIP-29 GROUPS FROM RELAYS');
+              resolve(groups);
+            }
+          }
+        );
+        
+        // Set timeout to prevent hanging
+        timeoutId = setTimeout(() => {
+          console.log('⏰ ==> NIP-29 QUERY TIMEOUT REACHED (10 seconds)');
+          console.log('📅 Groups found before timeout:', groups.length);
+          subscription.close();
+          console.log('🚫 ==> RETURNING', groups.length, 'NIP-29 GROUPS DUE TO TIMEOUT');
+          resolve(groups);
+        }, 10000); // 10 second timeout
+      });
+      
+    } catch (error) {
+      console.error('Error querying NIP-29 groups:', error);
+      return [];
+    }
+  }
+
+  // NIP-29 Group Messaging Methods
+  async sendNIP29GroupMessage(groupId, message, replyTo = null) {
+    try {
+      console.log('🏛️ Sending NIP-29 group message...');
+      
+      // Get NIP-29 relays from storage
+      const nip29RelaysStored = await AsyncStorage.getItem('nip29_relays');
+      const nip29Relays = nip29RelaysStored ? JSON.parse(nip29RelaysStored) : ['wss://relay.groups.nip29.com'];
+      
+      if (nip29Relays.length === 0) {
+        throw new Error('No NIP-29 relays configured');
+      }
+      
+      // Create NIP-29 group message event (kind 9)
+      const messageEvent = {
+        kind: 9, // NIP-29 group message
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['h', groupId], // group reference
+        ],
+        content: message
+        // Note: pubkey will be added by finalizeEvent
+      };
+      
+      if (replyTo) {
+        messageEvent.tags.push(['e', replyTo, '', 'reply']);
+      }
+      
+      // Convert private key to proper format for finalizeEvent
+      if (!this.privateKey) {
+        throw new Error('No private key available for signing');
+      }
+      
+      const privateKeyBytes = new Uint8Array(
+        this.privateKey.match(/.{1,2}/g).map(byte => parseInt(byte, 16))
+      );
+      
+      // Publish to NIP-29 relays
+      const finalEvent = finalizeEvent(messageEvent, privateKeyBytes);
+      
+      for (const relay of nip29Relays) {
+        try {
+          this.pool.publish([relay], finalEvent);
+          console.log(`✅ NIP-29 message sent to ${relay}`);
+        } catch (relayError) {
+          console.warn(`⚠️ Failed to send to ${relay}:`, relayError.message);
+        }
+      }
+      
+      return finalEvent;
+    } catch (error) {
+      console.error('Error sending NIP-29 group message:', error);
+      throw error;
+    }
+  }
+
+  async performNIP29ModerationAction(groupId, action, targetPubkey, reason = '') {
+    try {
+      console.log(`🏛️ Performing NIP-29 ${action} action...`);
+      
+      // Get NIP-29 relays from storage
+      const nip29RelaysStored = await AsyncStorage.getItem('nip29_relays');
+      const nip29Relays = nip29RelaysStored ? JSON.parse(nip29RelaysStored) : ['wss://relay.groups.nip29.com'];
+      
+      if (nip29Relays.length === 0) {
+        throw new Error('No NIP-29 relays configured');
+      }
+      
+      // Create NIP-29 moderation event based on action
+      let moderationEvent;
+      
+      switch (action) {
+        case 'kick':
+        case 'ban':
+          moderationEvent = {
+            kind: 9000 + (action === 'kick' ? 1 : 2), // kind 9001 for kick, 9002 for ban
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [
+              ['h', groupId], // group reference
+              ['p', targetPubkey], // target user
+              ['reason', reason] // reason for action
+            ],
+            content: reason || `User ${action}ed from group`
+            // Note: pubkey will be added by finalizeEvent
+          };
+          break;
+          
+        case 'op':
+        case 'deop':
+          moderationEvent = {
+            kind: 9003, // admin action
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [
+              ['h', groupId], // group reference
+              ['p', targetPubkey], // target user
+              ['action', action], // op or deop
+              ['reason', reason] // reason for action
+            ],
+            content: `User ${action === 'op' ? 'granted operator status' : 'operator status removed'}`
+            // Note: pubkey will be added by finalizeEvent
+          };
+          break;
+          
+        default:
+          throw new Error(`Unsupported NIP-29 moderation action: ${action}`);
+      }
+      
+      // Convert private key to proper format for finalizeEvent
+      if (!this.privateKey) {
+        throw new Error('No private key available for signing');
+      }
+      
+      const privateKeyBytes = new Uint8Array(
+        this.privateKey.match(/.{1,2}/g).map(byte => parseInt(byte, 16))
+      );
+      
+      // Publish to NIP-29 relays
+      const finalEvent = finalizeEvent(moderationEvent, privateKeyBytes);
+      
+      for (const relay of nip29Relays) {
+        try {
+          this.pool.publish([relay], finalEvent);
+          console.log(`✅ NIP-29 ${action} action sent to ${relay}`);
+        } catch (relayError) {
+          console.warn(`⚠️ Failed to send ${action} to ${relay}:`, relayError.message);
+        }
+      }
+      
+      return finalEvent;
+    } catch (error) {
+      console.error(`Error performing NIP-29 ${action}:`, error);
+      throw error;
     }
   }
 

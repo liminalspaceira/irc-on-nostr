@@ -19,6 +19,7 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
   const [channelDescription, setChannelDescription] = useState('');
   const [channelPicture, setChannelPicture] = useState('');
   const [channelType, setChannelType] = useState('public'); // 'public' or 'private'
+  const [privateGroupProtocol, setPrivateGroupProtocol] = useState('private_nip28'); // 'private_nip28', 'encrypted', or 'nip29'
   const [isCreating, setIsCreating] = useState(false);
   
   // Modal states
@@ -95,12 +96,29 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
       
       let event;
       if (channelType === 'private') {
-        // Create private group
-        event = await nostrService.createPrivateGroup(
-          cleanName,
-          channelDescription.trim() || `Private group: ${cleanName}`,
-          channelPicture.trim()
-        );
+        // Create private group with selected protocol
+        if (privateGroupProtocol === 'nip29') {
+          event = await nostrService.createNIP29Group(
+            cleanName,
+            channelDescription.trim() || `Private group: ${cleanName}`,
+            channelPicture.trim()
+          );
+        } else if (privateGroupProtocol === 'encrypted') {
+          // Real encrypted group with shared secret
+          event = await nostrService.createRealEncryptedGroup(
+            cleanName,
+            channelDescription.trim() || `Encrypted group: ${cleanName}`,
+            channelPicture.trim(),
+            [] // No initial members for now - could add member selection UI
+          );
+        } else {
+          // Private NIP-28 channel (basic privacy flag)
+          event = await nostrService.createPrivateGroup(
+            cleanName,
+            channelDescription.trim() || `Private group: ${cleanName}`,
+            channelPicture.trim()
+          );
+        }
       } else {
         // Create public channel
         event = await nostrService.createChannel(
@@ -124,7 +142,8 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
               navigation.replace('Channel', {
                 channelId: event.id,
                 channelName: cleanName,
-                isPrivate: channelType === 'private'
+                isPrivate: channelType === 'private',
+                protocol: channelType === 'private' ? privateGroupProtocol : 'public'
               });
             }
           }
@@ -220,10 +239,121 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
           <Text style={[styles.helpText, { color: theme.secondaryTextColor }]}>
             {channelType === 'public' 
               ? 'Anyone can discover and join this channel'
-              : 'Invitation-only encrypted group chat (recommended for <50 members)'
+              : 'Invitation-only encrypted group chat'
             }
           </Text>
         </View>
+
+        {/* Private Group Protocol Selection */}
+        {channelType === 'private' && (
+          <View style={styles.inputGroup}>
+            <Text style={[styles.label, { color: theme.textColor }]}>
+              Group Protocol *
+            </Text>
+            <View style={styles.protocolSelectionContainer}>
+              <TouchableOpacity
+                style={[
+                  styles.protocolButton,
+                  {
+                    backgroundColor: privateGroupProtocol === 'private_nip28' ? theme.warningColor : theme.surfaceColor,
+                    borderColor: privateGroupProtocol === 'private_nip28' ? theme.warningColor : theme.borderColor
+                  }
+                ]}
+                onPress={() => setPrivateGroupProtocol('private_nip28')}
+              >
+                <Ionicons 
+                  name="eye-off-outline" 
+                  size={18} 
+                  color={privateGroupProtocol === 'private_nip28' ? 'white' : theme.secondaryTextColor} 
+                />
+                <View style={styles.protocolInfo}>
+                  <Text style={[
+                    styles.protocolButtonText,
+                    { color: privateGroupProtocol === 'private_nip28' ? 'white' : theme.textColor }
+                  ]}>
+                    Private NIP-28 (Basic)
+                  </Text>
+                  <Text style={[
+                    styles.protocolSubtext,
+                    { color: privateGroupProtocol === 'private_nip28' ? 'rgba(255,255,255,0.8)' : theme.secondaryTextColor }
+                  ]}>
+                    Invitation-only • Fake moderation
+                  </Text>
+                </View>
+              </TouchableOpacity>
+              
+              <TouchableOpacity
+                style={[
+                  styles.protocolButton,
+                  {
+                    backgroundColor: privateGroupProtocol === 'encrypted' ? theme.successColor : theme.surfaceColor,
+                    borderColor: privateGroupProtocol === 'encrypted' ? theme.successColor : theme.borderColor
+                  }
+                ]}
+                onPress={() => setPrivateGroupProtocol('encrypted')}
+              >
+                <Ionicons 
+                  name="shield-checkmark-outline" 
+                  size={18} 
+                  color={privateGroupProtocol === 'encrypted' ? 'white' : theme.secondaryTextColor} 
+                />
+                <View style={styles.protocolInfo}>
+                  <Text style={[
+                    styles.protocolButtonText,
+                    { color: privateGroupProtocol === 'encrypted' ? 'white' : theme.textColor }
+                  ]}>
+                    Encrypted (Real)
+                  </Text>
+                  <Text style={[
+                    styles.protocolSubtext,
+                    { color: privateGroupProtocol === 'encrypted' ? 'rgba(255,255,255,0.8)' : theme.secondaryTextColor }
+                  ]}>
+                    End-to-end encrypted • Real privacy
+                  </Text>
+                </View>
+              </TouchableOpacity>
+              
+              <TouchableOpacity
+                style={[
+                  styles.protocolButton,
+                  {
+                    backgroundColor: privateGroupProtocol === 'nip29' ? theme.primaryColor : theme.surfaceColor,
+                    borderColor: privateGroupProtocol === 'nip29' ? theme.primaryColor : theme.borderColor
+                  }
+                ]}
+                onPress={() => setPrivateGroupProtocol('nip29')}
+              >
+                <Ionicons 
+                  name="settings-outline" 
+                  size={18} 
+                  color={privateGroupProtocol === 'nip29' ? 'white' : theme.secondaryTextColor} 
+                />
+                <View style={styles.protocolInfo}>
+                  <Text style={[
+                    styles.protocolButtonText,
+                    { color: privateGroupProtocol === 'nip29' ? 'white' : theme.textColor }
+                  ]}>
+                    NIP-29 (Managed)
+                  </Text>
+                  <Text style={[
+                    styles.protocolSubtext,
+                    { color: privateGroupProtocol === 'nip29' ? 'rgba(255,255,255,0.8)' : theme.secondaryTextColor }
+                  ]}>
+                    Relay-based • Full moderation
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            </View>
+            <Text style={[styles.helpText, { color: theme.secondaryTextColor }]}>
+              {privateGroupProtocol === 'private_nip28' 
+                ? 'Encrypted invitations, plain text messages. No moderation. Use Encrypted or NIP-29 for real features.'
+                : privateGroupProtocol === 'encrypted'
+                ? 'All messages encrypted with shared secret. Real end-to-end privacy. No moderation capabilities.'
+                : 'Relay-managed groups with admin controls like kick/ban. Requires NIP-29 compatible relays.'
+              }
+            </Text>
+          </View>
+        )}
         <View style={styles.inputGroup}>
           <Text style={[styles.label, { color: theme.textColor }]}>
             Channel Name *
@@ -336,7 +466,12 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
           />
           <Text style={[styles.infoText, { color: theme.secondaryTextColor }]}>
             {channelType === 'private' 
-              ? 'Your private group will be encrypted and invitation-only. Only invited members can see messages. You can invite up to 50 members for optimal performance.'
+              ? (privateGroupProtocol === 'nip29' 
+                  ? 'Your NIP-29 group will be relay-managed with full moderation capabilities. You\'ll have admin controls to manage members, delete messages, and enforce rules.'
+                  : privateGroupProtocol === 'encrypted'
+                  ? 'Your Encrypted group will use shared secrets for real end-to-end encryption. All messages fully encrypted. Maximum privacy with no moderation.'
+                  : 'Your Private NIP-28 channel has encrypted invitations but plain text messages. No real moderation. For full features, use Encrypted or NIP-29.'
+                )
               : 'Your channel will be public and discoverable by anyone on the Nostr network. You\'ll automatically become the channel operator.'
             }
           </Text>
@@ -484,6 +619,31 @@ const styles = StyleSheet.create({
   typeButtonText: {
     fontSize: 14,
     fontWeight: '600',
+  },
+  protocolSelectionContainer: {
+    gap: 12,
+    marginBottom: 8,
+  },
+  protocolButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    borderWidth: 2,
+    gap: 12,
+  },
+  protocolInfo: {
+    flex: 1,
+  },
+  protocolButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  protocolSubtext: {
+    fontSize: 12,
+    fontWeight: '400',
   },
   characterCount: {
     fontSize: 12,

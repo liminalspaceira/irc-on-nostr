@@ -6,11 +6,12 @@ A decentralized IRC-like chat application built on the Nostr protocol, bringing 
 
 ### 🏗️ Core IRC Architecture
 - **Public Channels**: Create and join chat rooms using Nostr NIP-28 protocol
+- **Private Groups with Protocol Choice**: Choose between Private NIP-28 (basic privacy flag) and NIP-29 (relay-managed) protocols
 - **Real-time Messaging**: Live message streaming with WebSocket subscriptions  
 - **Channel Discovery**: Search and browse public channels across the entire Nostr network
-- **Channel Creation**: Full channel creation with metadata, topics, and descriptions
-- **User Operations**: Channel operators with comprehensive moderation powers
-- **Classic IRC Navigation**: Traditional IRC workflow with modern UI
+- **Channel Creation**: Full channel creation with metadata, topics, descriptions, and protocol selection
+- **User Operations**: Channel operators with comprehensive moderation powers (real enforcement in NIP-29)
+- **Classic IRC Navigation**: Traditional IRC workflow with modern UI and protocol indicators
 
 ### 🤖 Advanced Bot Ecosystem (32 Commands)
 
@@ -57,9 +58,15 @@ A decentralized IRC-like chat application built on the Nostr protocol, bringing 
 ### 📋 IRC Command System (8 Commands)
 
 #### 🏛️ Channel Management Commands
-- `/help` - Show IRC commands help with available operations
+- `/help` - Show IRC commands help with protocol-specific features and capabilities
 - `/users` - List active channel users with last seen timestamps  
 - `/topic [text]` - Set/view channel topic (operators only)
+
+#### ⚔️ Moderation Commands (Protocol-Dependent)
+- `/kick [user] [reason]` - Remove user (permanent in NIP-29, visual-only in others)
+- `/ban [user] [reason]` - Ban user (permanent in NIP-29, visual-only in others)
+- `/op [user]` - Grant operator status (real power in NIP-29, visual-only in others)
+- `/deop [user]` - Remove operator status (real effect in NIP-29, visual-only in others)
 
 #### 💬 Communication Commands
 - `/msg [username|pubkey|npub] [message]` - Send private message with username resolution
@@ -95,14 +102,42 @@ A decentralized IRC-like chat application built on the Nostr protocol, bringing 
 - **Interaction Analytics**: Real-time like, repost, and reply counts with user indicators
 - **Thread Display**: Intelligent thread organization with followed/unfollowed reply separation
 
-### 🔐 Private Messaging & Communication
-- **NIP-04 Encrypted Messages**: End-to-end encrypted private conversations
+### 🔐 Private Messaging & Group Communication
+
+#### 💬 Direct Messages (NIP-04)
+- **End-to-end Encrypted DMs**: Private conversations using NIP-04 encryption
 - **Conversation Management**: Organized conversation list with unread counts and timestamps
 - **Username Resolution**: Contact discovery using display names, usernames, pubkeys, or npubs
 - **Real-time DM System**: Live private message updates with optimistic sending
 - **Contact Management**: Add contacts via public key or npub with validation
 - **Message History**: Persistent conversation history with proper encryption/decryption
 - **Auto-navigation**: Direct navigation to conversations from `/msg` commands
+
+#### 🏛️ Private Groups - Hybrid Protocol System
+
+##### **NIP-29 Managed Groups (Real Moderation)**
+- **Relay-Managed Groups**: Groups hosted and enforced by NIP-29 compatible relays
+- **Real Admin Controls**: Kick/ban commands that actually work - users are blocked by the relay
+- **True Operator Privileges**: Operator status grants real moderation powers
+- **Dedicated Relay Infrastructure**: Uses specialized NIP-29 relays (relay.groups.nip29.com)
+- **Persistent Enforcement**: Moderation actions survive client restarts and are network-enforced
+- **Group ID System**: Uses cryptographic group identifiers for relay management
+- **Invitation System**: Controlled membership with admin-managed invitations
+
+##### **Private NIP-28 Channels (Limited Privacy)**
+- **Invitation-Only Access**: Only invited members can join the group
+- **Encrypted Invitations**: Invitations are encrypted using NIP-04
+- **Plain Text Messages**: Group messages are visible to relays in plain text
+- **Fake Moderation**: Kick/ban commands are cosmetic with zero enforcement
+- **Standard Nostr Relays**: Uses regular Nostr relay infrastructure
+- **Limited Privacy**: Some encryption for invites, but not for group chat
+
+##### **Protocol Selection & Management**
+- **Creation-Time Choice**: Select Private NIP-28 or NIP-29 when creating private groups
+- **Clear Protocol Indicators**: Visual badges showing group protocol type (🏛️ NIP-29, ⚠️ Private NIP-28)
+- **Separate Relay Management**: Dedicated NIP-29 relay configuration in settings
+- **Protocol-Aware Commands**: Commands behave differently based on group protocol
+- **Honest User Feedback**: Clear warnings when moderation commands have no effect
 
 ### 🎨 User Experience & Interface Design
 - **Cross-Platform Ready**: React Native app for iOS, Android, and Web deployment
@@ -116,12 +151,15 @@ A decentralized IRC-like chat application built on the Nostr protocol, bringing 
 
 ### 🔗 Network & Protocol Implementation
 - **Multi-Relay Architecture**: Connect to 17+ default Nostr relays simultaneously
+- **Dual Relay System**: Separate relay pools for standard Nostr and NIP-29 group relays
 - **Automatic Failover**: Graceful handling of relay disconnections and reconnections
 - **Event Subscriptions**: Real-time event streaming with sophisticated filter support
 - **NIP-19 Support**: Full npub/nsec encoding/decoding with format validation
 - **Profile Synchronization**: Automatic profile data fetching and intelligent caching
 - **Network-wide Search**: Deep search across the entire decentralized Nostr network
 - **Event Validation**: Cryptographic event verification and signature validation
+- **Protocol-Specific Publishing**: Messages route to appropriate relays based on group protocol
+- **NIP-29 Event Types**: Support for kind 9007 (group creation), kind 9 (group messages), kinds 9001-9003 (moderation)
 
 ### ⚙️ Technical Architecture & Capabilities
 
@@ -148,15 +186,15 @@ A decentralized IRC-like chat application built on the Nostr protocol, bringing 
 ### 📱 Screen Architecture & Components
 
 #### 🖥️ Main Application Screens
-- **HomeScreen**: Channel discovery with network search and real-time results
-- **ChannelScreen**: Full IRC chat interface with user lists and real-time messaging
-- **CreateChannelScreen**: Channel creation with validation and metadata input
+- **HomeScreen**: Channel discovery with protocol indicators and network search
+- **ChannelScreen**: Protocol-aware IRC chat interface with real/fake moderation feedback
+- **CreateChannelScreen**: Channel creation with Private NIP-28/NIP-29 protocol selection for private groups
 - **FeedScreen**: Social media feed with threaded posts and interactions
 - **PrivateMessageScreen**: Encrypted conversation list with contact management
 - **PrivateConversationScreen**: Individual encrypted chat interface
 - **ProfileScreen**: Complete profile management with following/followers
 - **UserProfileScreen**: View other users' profiles with follow/unfollow actions
-- **SettingsScreen**: Application settings and key management
+- **SettingsScreen**: Dual relay management (standard + NIP-29) and key management
 
 #### 🔧 Reusable UI Components
 - **ChannelList**: Reusable channel listing with member counts and descriptions
@@ -179,8 +217,36 @@ npm install
 npm start
 ```
 
+## Recent Updates (Latest Session)
+
+### 🎯 **Major Feature: Hybrid Private Group System**
+
+#### ✅ **Completed Implementation**
+1. **Protocol Selection Interface**: Users can choose between Private NIP-28 and NIP-29 when creating private groups
+2. **Dual Relay Management**: Separate relay configuration for NIP-29 groups vs standard Nostr relays
+3. **Visual Protocol Indicators**: Clear badges and icons showing group protocol types
+4. **Real NIP-29 Moderation**: Actual working kick/ban/op commands enforced by NIP-29 relays
+5. **Honest User Feedback**: Clear warnings when moderation commands are fake (non-NIP-29 groups)
+6. **Protocol-Aware Messaging**: Messages route to appropriate relay infrastructure
+7. **Enhanced Help System**: Protocol-specific command explanations and capabilities
+
+#### 🏛️ **NIP-29 Implementation Details**
+- **Group Creation**: Uses kind 9007 events with proper group identifiers
+- **Messaging**: Uses kind 9 events published to NIP-29 relays
+- **Moderation Events**: Uses kinds 9001 (kick), 9002 (ban), 9003 (admin actions)
+- **Relay Integration**: Connects to relay.groups.nip29.com and user-configured NIP-29 relays
+- **Real Enforcement**: Users are actually blocked/removed by relay infrastructure
+
+#### ⚖️ **Moderation System Honesty**
+- **NIP-29 Groups**: 
+  - ✅ "User permanently removed from NIP-29 group. Action enforced by relay."
+  - ✅ Real admin powers that actually work
+- **Private NIP-28/Public Groups**: 
+  - ⚠️ "FAKE MODERATION: User can still send messages. Use NIP-29 for real moderation."
+  - Clear warnings that commands have no effect
+
 ## Development Status
 
-🚧 **In Development** - This project is currently being built.
+🚀 **Production Ready Features** - Hybrid private group system with real NIP-29 moderation is complete and functional.
 
 See `DEVELOPMENT_PLAN.md` for detailed roadmap and implementation phases.

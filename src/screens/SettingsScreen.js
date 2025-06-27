@@ -15,14 +15,16 @@ import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getPublicKey, nip19 } from 'nostr-tools';
 import { nostrService } from '../services/NostrService';
+import { notificationService } from '../services/NotificationService';
 import { nostrUtils } from '../utils/nostrUtils';
 import CacheManager from '../components/CacheManager';
-import { STORAGE_KEYS, THEMES, DEFAULT_RELAYS } from '../utils/constants';
+import { STORAGE_KEYS, THEMES, DEFAULT_RELAYS, NIP29_RELAYS } from '../utils/constants';
 
 const SettingsScreen = ({ theme = THEMES.DARK }) => {
   const [privateKey, setPrivateKey] = useState('');
   const [publicKey, setPublicKey] = useState('');
   const [relays, setRelays] = useState(DEFAULT_RELAYS);
+  const [nip29Relays, setNip29Relays] = useState(NIP29_RELAYS);
   const [settings, setSettings] = useState({
     notifications: true,
     soundEnabled: true
@@ -33,11 +35,15 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
   const [addRelayModalVisible, setAddRelayModalVisible] = useState(false);
   const [newPrivateKey, setNewPrivateKey] = useState('');
   const [newRelayUrl, setNewRelayUrl] = useState('');
+  const [relayType, setRelayType] = useState('standard'); // 'standard' or 'nip29'
   const [connectionStatus, setConnectionStatus] = useState({ isConnected: false });
 
   useEffect(() => {
     loadUserData();
     loadSettings();
+    
+    // Initialize notification service
+    notificationService.initialize();
     
     // Update connection status periodically
     const interval = setInterval(() => {
@@ -52,10 +58,12 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
       const storedPrivateKey = await AsyncStorage.getItem(STORAGE_KEYS.PRIVATE_KEY);
       const storedPublicKey = await AsyncStorage.getItem(STORAGE_KEYS.PUBLIC_KEY);
       const storedRelays = await AsyncStorage.getItem(STORAGE_KEYS.RELAYS);
+      const storedNip29Relays = await AsyncStorage.getItem('nip29_relays');
       
       if (storedPrivateKey) setPrivateKey(storedPrivateKey);
       if (storedPublicKey) setPublicKey(storedPublicKey);
       if (storedRelays) setRelays(JSON.parse(storedRelays));
+      if (storedNip29Relays) setNip29Relays(JSON.parse(storedNip29Relays));
     } catch (error) {
       console.error('Error loading user data:', error);
     }
@@ -76,6 +84,12 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
     try {
       await AsyncStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(newSettings));
       setSettings(newSettings);
+      
+      // Update notification service settings
+      notificationService.updateSettings({
+        notifications: newSettings.notifications,
+        soundEnabled: newSettings.soundEnabled
+      });
     } catch (error) {
       console.error('Error saving settings:', error);
       Alert.alert('Error', 'Failed to save settings');
@@ -274,20 +288,29 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
       return;
     }
     
-    if (relays.includes(trimmedUrl)) {
+    const currentRelays = relayType === 'nip29' ? nip29Relays : relays;
+    if (currentRelays.includes(trimmedUrl)) {
       showAlert('Error', 'This relay is already in your list');
       return;
     }
 
     try {
-      const updatedRelays = [...relays, trimmedUrl];
-      setRelays(updatedRelays);
-      await AsyncStorage.setItem(STORAGE_KEYS.RELAYS, JSON.stringify(updatedRelays));
+      if (relayType === 'nip29') {
+        const updatedNip29Relays = [...nip29Relays, trimmedUrl];
+        setNip29Relays(updatedNip29Relays);
+        await AsyncStorage.setItem('nip29_relays', JSON.stringify(updatedNip29Relays));
+      } else {
+        const updatedRelays = [...relays, trimmedUrl];
+        setRelays(updatedRelays);
+        await AsyncStorage.setItem(STORAGE_KEYS.RELAYS, JSON.stringify(updatedRelays));
+      }
       
       setNewRelayUrl('');
       setAddRelayModalVisible(false);
+      setRelayType('standard');
       
-      showAlert('Success', 'Relay added successfully! Reconnecting to Nostr network...');
+      const relayTypeText = relayType === 'nip29' ? 'NIP-29' : 'standard';
+      showAlert('Success', `${relayTypeText} relay added successfully! Reconnecting to Nostr network...`);
       
       // Reconnect to include the new relay
       try {
@@ -421,15 +444,31 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
             (value) => saveSettings({ ...settings, soundEnabled: value }),
             'Play sounds for message notifications'
           )}
+          
+          {/* Test Notification Button */}
+          <TouchableOpacity
+            style={[styles.testButton, { backgroundColor: theme.primaryColor }]}
+            onPress={() => {
+              // Enable audio context on user interaction
+              notificationService.enableAudio();
+              notificationService.testNotification();
+            }}
+          >
+            <Ionicons name="notifications" size={20} color="white" />
+            <Text style={styles.testButtonText}>Test Notification</Text>
+          </TouchableOpacity>
         </View>
       ))}
 
       {/* Cache Management */}
       <CacheManager theme={theme} />
 
-      {/* Relays */}
-      {renderSection('Nostr Relays', (
+      {/* Standard Relays */}
+      {renderSection('Standard Nostr Relays', (
         <View>
+          <Text style={[styles.relayDescription, { color: theme.secondaryTextColor }]}>
+            Used for public channels, private messages (NIP-17), feeds, and general Nostr activity.
+          </Text>
           {relays.map((relay, index) => (
             <View key={index} style={styles.relayItem}>
               <Ionicons name="server" size={16} color={theme.primaryColor} />
@@ -443,14 +482,64 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
             </View>
           ))}
           
-          {/* Add Relay Button */}
+          {/* Add Standard Relay Button */}
           <TouchableOpacity
             style={[styles.addRelayButton, { backgroundColor: theme.primaryColor }]}
-            onPress={() => setAddRelayModalVisible(true)}
+            onPress={() => {
+              setRelayType('standard');
+              setAddRelayModalVisible(true);
+            }}
           >
             <Ionicons name="add" size={20} color="white" />
-            <Text style={styles.addRelayButtonText}>Add Relay</Text>
+            <Text style={styles.addRelayButtonText}>Add Standard Relay</Text>
           </TouchableOpacity>
+        </View>
+      ))}
+
+      {/* NIP-29 Relays */}
+      {renderSection('NIP-29 Group Relays', (
+        <View>
+          <Text style={[styles.relayDescription, { color: theme.secondaryTextColor }]}>
+            Used for managed private groups with moderation capabilities (kick/ban/admin controls).
+          </Text>
+          {nip29Relays.map((relay, index) => (
+            <View key={`nip29-${index}`} style={styles.relayItem}>
+              <Ionicons name="settings" size={16} color={theme.warningColor} />
+              <Text style={[styles.relayUrl, { color: theme.textColor }]}>
+                {relay}
+              </Text>
+              <View style={styles.nip29Badge}>
+                <Text style={[styles.nip29BadgeText, { color: theme.warningColor }]}>
+                  NIP-29
+                </Text>
+              </View>
+              <View style={[styles.relayStatus, { 
+                backgroundColor: connectionStatus.connectedRelays?.includes(relay) ? 
+                  theme.successColor : theme.borderColor 
+              }]} />
+            </View>
+          ))}
+          
+          {/* Add NIP-29 Relay Button */}
+          <TouchableOpacity
+            style={[styles.addRelayButton, { backgroundColor: theme.warningColor }]}
+            onPress={() => {
+              setRelayType('nip29');
+              setAddRelayModalVisible(true);
+            }}
+          >
+            <Ionicons name="add" size={20} color="white" />
+            <Text style={styles.addRelayButtonText}>Add NIP-29 Relay</Text>
+          </TouchableOpacity>
+          
+          {nip29Relays.length === 0 && (
+            <View style={styles.emptyRelayNotice}>
+              <Ionicons name="information-circle" size={20} color={theme.secondaryTextColor} />
+              <Text style={[styles.emptyRelayText, { color: theme.secondaryTextColor }]}>
+                No NIP-29 relays configured. Add one to enable managed private groups with moderation.
+              </Text>
+            </View>
+          )}
         </View>
       ))}
 
@@ -559,13 +648,25 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
         <View style={styles.modalOverlay}>
           <View style={[styles.modalContent, { backgroundColor: theme.cardBackgroundColor }]}>
             <Text style={[styles.modalTitle, { color: theme.textColor }]}>
-              Add Nostr Relay
+              Add {relayType === 'nip29' ? 'NIP-29' : 'Standard'} Relay
             </Text>
             <Text style={[styles.modalDescription, { color: theme.secondaryTextColor }]}>
-              Enter a WebSocket URL for a Nostr relay:
+              {relayType === 'nip29' 
+                ? 'Enter a WebSocket URL for a NIP-29 group relay with moderation support:'
+                : 'Enter a WebSocket URL for a standard Nostr relay:'
+              }
               {'\n'}• wss://relay.example.com
               {'\n'}• Must start with wss:// or ws://
             </Text>
+            
+            {relayType === 'nip29' && (
+              <View style={[styles.warningBox, { backgroundColor: `${theme.warningColor}20`, borderColor: theme.warningColor }]}>
+                <Ionicons name="warning" size={16} color={theme.warningColor} />
+                <Text style={[styles.warningText, { color: theme.warningColor }]}>
+                  NIP-29 relays enable admin controls but require relay support. Verify the relay supports NIP-29 before adding.
+                </Text>
+              </View>
+            )}
             
             <TextInput
               style={[styles.modalInput, { 
@@ -588,6 +689,7 @@ const SettingsScreen = ({ theme = THEMES.DARK }) => {
                 onPress={() => {
                   setAddRelayModalVisible(false);
                   setNewRelayUrl('');
+                  setRelayType('standard');
                 }}
               >
                 <Text style={[styles.modalButtonText, { color: theme.textColor }]}>
@@ -779,6 +881,65 @@ const styles = StyleSheet.create({
   modalButtonText: {
     fontSize: 16,
     fontWeight: '600',
+  },
+  testButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    marginTop: 16,
+  },
+  testButtonText: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: 8,
+  },
+  relayDescription: {
+    fontSize: 12,
+    marginBottom: 12,
+    lineHeight: 16,
+  },
+  nip29Badge: {
+    backgroundColor: 'rgba(255, 193, 7, 0.1)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginLeft: 8,
+  },
+  nip29BadgeText: {
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  emptyRelayNotice: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    padding: 12,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderRadius: 8,
+    marginTop: 12,
+    gap: 8,
+  },
+  emptyRelayText: {
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  warningBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    padding: 8,
+    borderRadius: 6,
+    borderWidth: 1,
+    marginBottom: 12,
+    gap: 8,
+  },
+  warningText: {
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 16,
   },
 });
 

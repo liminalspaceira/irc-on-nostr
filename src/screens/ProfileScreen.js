@@ -43,6 +43,37 @@ const ProfileScreen = ({ navigation, theme = THEMES.DARK }) => {
     loadFollowers();
   }, []);
 
+  // Add focus listener to refresh data when returning to screen
+  useEffect(() => {
+    const unsubscribe = navigation?.addListener?.('focus', () => {
+      // Force refresh of following/followers data with cache invalidation
+      const refreshFollowData = async () => {
+        try {
+          const storedPublicKey = await AsyncStorage.getItem(STORAGE_KEYS.PUBLIC_KEY);
+          if (storedPublicKey) {
+            // Invalidate caches first to ensure fresh data
+            await Promise.all([
+              nostrService.cacheService?.invalidateFollowing?.(storedPublicKey),
+              nostrService.cacheService?.invalidateFollowers?.(storedPublicKey),
+            ]);
+          }
+          
+          // Then reload fresh data
+          await Promise.all([
+            loadFollowing(),
+            loadFollowers(),
+          ]);
+        } catch (error) {
+          console.error('Error refreshing follow data on focus:', error);
+        }
+      };
+      
+      refreshFollowData();
+    });
+
+    return unsubscribe;
+  }, [navigation]);
+
   const loadProfile = async () => {
     try {
       const storedPublicKey = await AsyncStorage.getItem(STORAGE_KEYS.PUBLIC_KEY);
@@ -86,6 +117,9 @@ const ProfileScreen = ({ navigation, theme = THEMES.DARK }) => {
       if (!storedPublicKey) return;
 
       setIsLoadingFollowing(true);
+      
+      // Invalidate cache to ensure fresh data (especially after follow/unfollow)
+      await nostrService.cacheService?.invalidateFollowing?.(storedPublicKey);
       
       // Get the user's contact list
       const contacts = await nostrService.getUserContacts(storedPublicKey);

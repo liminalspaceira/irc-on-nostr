@@ -17,11 +17,13 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { nostrService } from '../services/NostrService';
 import { botService } from '../services/BotService';
+import { notificationService } from '../services/NotificationService';
+import { groupEncryptionService } from '../services/GroupEncryptionService';
 import { nostrUtils } from '../utils/nostrUtils';
 import { IRC_COMMANDS, BOT_COMMANDS, MESSAGE_TYPES, THEMES } from '../utils/constants';
 
 const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
-  const { channelId, channelName, isPrivate = false } = route.params;
+  const { channelId, channelName, isPrivate = false, protocol = 'public' } = route.params;
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState('');
   const [users, setUsers] = useState([]);
@@ -36,19 +38,22 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [inviteePubkey, setInviteePubkey] = useState('');
   const [inviteMessage, setInviteMessage] = useState('');
+  const [isPrivateGroup, setIsPrivateGroup] = useState(isPrivate);
+  const [channelProtocol, setChannelProtocol] = useState(protocol);
   const flatListRef = useRef();
   const subscriptionRef = useRef();
 
 
+  // Update header when navigation-related data changes
   useEffect(() => {
     const operatorIndicator = userPermissions.isOperator ? ' @' : '';
-    const groupPrefix = isPrivate ? '🔒 ' : '#';
+    const protocolIndicator = channelProtocol === 'nip29' ? '🏛️ ' : channelProtocol === 'private_nip28' ? '⚠️ ' : '#';
     navigation.setOptions({ 
-      title: `${groupPrefix}${channelName}${operatorIndicator}`,
+      title: `${protocolIndicator}${channelName}${operatorIndicator}`,
       headerRight: () => (
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           {/* Invite button for private groups */}
-          {isPrivate && (
+          {isPrivateGroup && (
             <TouchableOpacity 
               onPress={() => setShowInviteModal(true)}
               style={{ marginRight: 16 }}
@@ -70,17 +75,13 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
               color={theme.textColor} 
             />
           </TouchableOpacity>
-          <TouchableOpacity onPress={showChannelInfo}>
-            <Ionicons 
-              name={userPermissions.isOperator ? "shield" : "information-circle-outline"} 
-              size={24} 
-              color={userPermissions.isOperator ? theme.successColor : theme.textColor} 
-            />
-          </TouchableOpacity>
         </View>
       )
     });
+  }, [channelName, channelProtocol, isPrivateGroup, userPermissions.isOperator, showUserList]);
 
+  // Load channel data and set up subscriptions (only when channel changes)
+  useEffect(() => {
     loadChannelData();
     subscribeToChannel();
     setupLocalBotResponseListener();
@@ -91,7 +92,7 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
       }
       cleanupLocalBotResponseListener();
     };
-  }, [channelId]);
+  }, [channelId, isPrivateGroup, channelProtocol]);
 
   const loadChannelData = async () => {
     try {
@@ -115,7 +116,7 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
       }
       
       // Load private group members if this is a private group
-      if (isPrivate) {
+      if (isPrivateGroup) {
         await loadPrivateGroupMembers();
       }
       
@@ -138,6 +139,37 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
       if (currentChannel) {
         setChannelInfo(currentChannel);
         setChannelTopic(currentChannel.about || ''); // Use about as initial topic
+        
+        // Check if this is a private group by looking for private group markers in the event
+        const isChannelPrivate = currentChannel.tags?.some(tag => tag[0] === 'private' && tag[1] === 'true') ||
+                                currentChannel.about?.includes('Private group') ||
+                                (currentChannel.content && JSON.parse(currentChannel.content)?.type === 'private');
+        
+        // Check if this is an encrypted group (also needs invite functionality for key distribution)
+        const isChannelEncrypted = currentChannel.tags?.some(tag => tag[0] === 'encrypted' && tag[1] === 'true') ||
+                                  currentChannel.tags?.some(tag => tag[0] === 'protocol' && tag[1] === 'encrypted') ||
+                                  currentChannel.about?.includes('Encrypted group') ||
+                                  currentChannel.protocol === 'encrypted' ||
+                                  currentChannel.encrypted === true;
+        
+        // Both private and encrypted channels need invite functionality
+        const needsInviteButton = isChannelPrivate || isChannelEncrypted;
+        
+        // Detect protocol - check for NIP-29 indicators first, then encrypted, then private
+        let detectedProtocol = protocol; // Start with passed protocol
+        if (currentChannel.kind === 9007) {
+          detectedProtocol = 'nip29';
+        } else if (currentChannel.tags?.some(tag => tag[0] === 'protocol' && tag[1] === 'nip29')) {
+          detectedProtocol = 'nip29';
+        } else if (isChannelEncrypted) {
+          detectedProtocol = 'encrypted'; // Encrypted groups
+        } else if (isChannelPrivate && detectedProtocol === 'public') {
+          detectedProtocol = 'private_nip28'; // Default private groups to Private NIP-28
+        }
+        
+        setIsPrivateGroup(needsInviteButton); // Use combined logic for invite button visibility
+        setChannelProtocol(detectedProtocol);
+        console.log(`🔍 Channel ${channelId.substring(0, 8)}... detected as ${needsInviteButton ? 'private/encrypted' : 'public'} using ${detectedProtocol}`);
         
         // Check if current user is creator (auto-operator)
         const currentUserPubkey = nostrService.publicKey;
@@ -264,6 +296,27 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
       return updated;
     });
     
+    // Show notifications for new messages (but not for system messages or own messages)
+    if (message.type !== MESSAGE_TYPES.SYSTEM && 
+        message.author !== 'system' && 
+        message.author !== 'bot' &&
+        message.author !== nostrService.publicKey) {
+      
+      const authorName = getUserDisplayName(message.author) || 'Unknown User';
+      
+      // Check if this is a mention of the current user
+      const currentUserPubkey = nostrService.publicKey;
+      const isMention = message.content.includes(`@${currentUserPubkey}`) ||
+                       (getUserDisplayName(currentUserPubkey) && 
+                        message.content.includes(`@${getUserDisplayName(currentUserPubkey)}`));
+      
+      if (isMention) {
+        notificationService.notifyMention(channelName, authorName, message.content);
+      } else {
+        notificationService.notifyChannelMessage(channelName, authorName, message.content);
+      }
+    }
+
     // Track user if it's not a system message
     if (message.author && message.author !== 'system' && message.author !== 'bot') {
       trackUser(message.author, message.timestamp);
@@ -423,8 +476,12 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
       if (botCommand) {
         console.log('Bot command detected:', botCommand);
         try {
-          // First try to send the command as a regular message so everyone can see it
-          await nostrService.sendChannelMessage(channelId, trimmedText);
+          // Send message using protocol-appropriate method
+          if (channelProtocol === 'nip29') {
+            await sendNIP29Message(channelId, trimmedText);
+          } else {
+            await nostrService.sendChannelMessage(channelId, trimmedText);
+          }
           console.log('✅ Bot command sent to Nostr, framework will pick it up');
         } catch (relayError) {
           console.warn('⚠️ Relay publishing failed for bot command, processing locally:', relayError.message);
@@ -448,13 +505,58 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
         return;
       }
 
-      // Regular message
-      await nostrService.sendChannelMessage(channelId, trimmedText);
+      // Regular message - use protocol-appropriate method
+      if (channelProtocol === 'nip29') {
+        await sendNIP29Message(channelId, trimmedText);
+      } else {
+        await nostrService.sendChannelMessage(channelId, trimmedText);
+      }
       setInputText('');
       
     } catch (error) {
       console.error('Failed to send message:', error);
       Alert.alert('Error', 'Failed to send message');
+    }
+  };
+
+  // Send message specifically to NIP-29 group
+  const sendNIP29Message = async (groupId, message) => {
+    try {
+      console.log('🏛️ Sending NIP-29 group message...');
+      
+      // Use the dedicated NIP-29 messaging method
+      await nostrService.sendNIP29GroupMessage(groupId, message);
+      
+      console.log('✅ NIP-29 message sent successfully');
+    } catch (error) {
+      console.error('Error sending NIP-29 message:', error);
+      throw error;
+    }
+  };
+
+  // Perform NIP-29 specific moderation actions
+  const performNIP29ModerationAction = async (action, targetUser, reason = '') => {
+    try {
+      console.log(`🏛️ Performing NIP-29 ${action} action on ${targetUser}`);
+      
+      // Use the dedicated NIP-29 moderation method
+      await nostrService.performNIP29ModerationAction(channelId, action, targetUser, reason);
+      
+      // Add a system message indicating this is a NIP-29 action
+      const systemMessage = {
+        id: `nip29_${action}_${Date.now()}`,
+        content: `🏛️ NIP-29 Moderation: ${action} action performed on ${targetUser.substring(0, 8)}...${reason ? ` (${reason})` : ''}`,
+        author: 'system',
+        channelId: channelId,
+        timestamp: Math.floor(Date.now() / 1000),
+        type: MESSAGE_TYPES.SYSTEM
+      };
+      onNewMessage(systemMessage);
+      
+      console.log(`✅ NIP-29 ${action} action completed`);
+    } catch (error) {
+      console.error(`Error performing NIP-29 ${action}:`, error);
+      throw error;
     }
   };
 
@@ -548,8 +650,26 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
         if (command.args.length > 0) {
           const targetUser = command.args[0];
           const reason = command.args.slice(1).join(' ') || 'No reason provided';
-          await nostrService.performModerationAction(channelId, 'kick', targetUser, reason);
-          Alert.alert('User Kicked', `${targetUser.substring(0, 16)}... has been kicked: ${reason}`);
+          
+          if (channelProtocol === 'nip29') {
+            await performNIP29ModerationAction('kick', targetUser, reason);
+            Alert.alert('User Removed', `${targetUser.substring(0, 16)}... has been permanently removed from the NIP-29 group.\n\nThis action is enforced by the relay - the user cannot send messages anymore.`);
+          } else {
+            await nostrService.performModerationAction(channelId, 'kick', targetUser, reason);
+            const protocolName = channelProtocol === 'private_nip28' ? 'Private NIP-28 channel' : 'public channel';
+            Alert.alert('⚠️ Fake Kick Only', `This is a ${protocolName} - kick commands are NOT enforced.\n\n"${targetUser.substring(0, 16)}..." can still send messages. Only NIP-29 groups have real moderation.\n\nConsider creating a NIP-29 group for actual admin controls.`);
+            
+            // Add system message explaining this is fake
+            const systemMessage = {
+              id: `fake_kick_${Date.now()}`,
+              content: `⚠️ FAKE MODERATION: "${targetUser.substring(0, 8)}..." was "kicked" but this has NO EFFECT in ${protocolName}s. User can still send messages. Use NIP-29 groups for real moderation.`,
+              author: 'system',
+              channelId: channelId,
+              timestamp: Math.floor(Date.now() / 1000),
+              type: MESSAGE_TYPES.SYSTEM
+            };
+            onNewMessage(systemMessage);
+          }
         } else {
           Alert.alert('Error', 'Usage: /kick <user> [reason]');
         }
@@ -563,8 +683,26 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
         if (command.args.length > 0) {
           const targetUser = command.args[0];
           const reason = command.args.slice(1).join(' ') || 'No reason provided';
-          await nostrService.performModerationAction(channelId, 'ban', targetUser, reason);
-          Alert.alert('User Banned', `${targetUser.substring(0, 16)}... has been banned: ${reason}`);
+          
+          if (channelProtocol === 'nip29') {
+            await performNIP29ModerationAction('ban', targetUser, reason);
+            Alert.alert('User Removed', `${targetUser.substring(0, 16)}... has been permanently removed from the NIP-29 group.\n\nThis action is enforced by the relay - the user cannot send messages anymore.`);
+          } else {
+            await nostrService.performModerationAction(channelId, 'ban', targetUser, reason);
+            const protocolName = channelProtocol === 'private_nip28' ? 'Private NIP-28 channel' : 'public channel';
+            Alert.alert('⚠️ Fake Ban Only', `This is a ${protocolName} - ban commands are NOT enforced.\n\n"${targetUser.substring(0, 16)}..." can still send messages and rejoin. Only NIP-29 groups have real moderation.\n\nConsider creating a NIP-29 group for actual admin controls.`);
+            
+            // Add system message explaining this is fake
+            const systemMessage = {
+              id: `fake_ban_${Date.now()}`,
+              content: `⚠️ FAKE MODERATION: "${targetUser.substring(0, 8)}..." was "banned" but this has NO EFFECT in ${protocolName}s. User can still send messages and rejoin. Use NIP-29 groups for real moderation.`,
+              author: 'system',
+              channelId: channelId,
+              timestamp: Math.floor(Date.now() / 1000),
+              type: MESSAGE_TYPES.SYSTEM
+            };
+            onNewMessage(systemMessage);
+          }
         } else {
           Alert.alert('Error', 'Usage: /ban <user> [reason]');
         }
@@ -577,8 +715,26 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
         }
         if (command.args.length > 0) {
           const targetUser = command.args[0];
-          await nostrService.performModerationAction(channelId, 'op', targetUser);
-          Alert.alert('Operator Granted', `${targetUser.substring(0, 16)}... is now an operator`);
+          
+          if (channelProtocol === 'nip29') {
+            await performNIP29ModerationAction('op', targetUser);
+            Alert.alert('Operator Granted', `${targetUser.substring(0, 16)}... is now an operator in the NIP-29 group.\n\nThey have real admin powers enforced by the relay.`);
+          } else {
+            await nostrService.performModerationAction(channelId, 'op', targetUser);
+            const protocolName = channelProtocol === 'private_nip28' ? 'Private NIP-28 channel' : 'public channel';
+            Alert.alert('⚠️ Fake Op Only', `This is a ${protocolName} - op commands are NOT enforced.\n\n"${targetUser.substring(0, 16)}..." has no real admin powers. Only NIP-29 groups have actual operator privileges.`);
+            
+            // Add system message explaining this is fake
+            const systemMessage = {
+              id: `fake_op_${Date.now()}`,
+              content: `⚠️ FAKE MODERATION: "${targetUser.substring(0, 8)}..." was "opped" but this has NO EFFECT in ${protocolName}s. User has no real admin powers. Use NIP-29 groups for real operator privileges.`,
+              author: 'system',
+              channelId: channelId,
+              timestamp: Math.floor(Date.now() / 1000),
+              type: MESSAGE_TYPES.SYSTEM
+            };
+            onNewMessage(systemMessage);
+          }
         } else {
           Alert.alert('Error', 'Usage: /op <user>');
         }
@@ -591,8 +747,26 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
         }
         if (command.args.length > 0) {
           const targetUser = command.args[0];
-          await nostrService.performModerationAction(channelId, 'deop', targetUser);
-          Alert.alert('Operator Removed', `${targetUser.substring(0, 16)}... is no longer an operator`);
+          
+          if (channelProtocol === 'nip29') {
+            await performNIP29ModerationAction('deop', targetUser);
+            Alert.alert('Operator Removed', `${targetUser.substring(0, 16)}... is no longer an operator in the NIP-29 group.\n\nTheir admin powers have been revoked by the relay.`);
+          } else {
+            await nostrService.performModerationAction(channelId, 'deop', targetUser);
+            const protocolName = channelProtocol === 'private_nip28' ? 'Private NIP-28 channel' : 'public channel';
+            Alert.alert('⚠️ Fake Deop Only', `This is a ${protocolName} - deop commands are NOT enforced.\n\n"${targetUser.substring(0, 16)}..." status unchanged. Only NIP-29 groups have actual operator management.`);
+            
+            // Add system message explaining this is fake
+            const systemMessage = {
+              id: `fake_deop_${Date.now()}`,
+              content: `⚠️ FAKE MODERATION: "${targetUser.substring(0, 8)}..." was "deopped" but this has NO EFFECT in ${protocolName}s. User status unchanged. Use NIP-29 groups for real operator management.`,
+              author: 'system',
+              channelId: channelId,
+              timestamp: Math.floor(Date.now() / 1000),
+              type: MESSAGE_TYPES.SYSTEM
+            };
+            onNewMessage(systemMessage);
+          }
         } else {
           Alert.alert('Error', 'Usage: /deop <user>');
         }
@@ -688,9 +862,42 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
         return;
       }
 
-      await nostrService.inviteToPrivateGroup(channelId, pubkey, inviteMessage);
-      
-      Alert.alert('Success', 'Invitation sent successfully!');
+      // Check if this is an encrypted channel that needs key distribution
+      if (channelProtocol === 'encrypted') {
+        console.log('🔐 Sending encrypted channel invitation with key distribution...');
+        
+        // Get the current group encryption key
+        const groupKey = await groupEncryptionService.getGroupKey(channelId);
+        if (!groupKey) {
+          Alert.alert('Error', 'Could not retrieve encryption key for this channel');
+          return;
+        }
+        
+        // Distribute the group key to the new member
+        const keyDistribution = await groupEncryptionService.distributeGroupKey(
+          channelId,
+          groupKey.key,
+          groupKey.version,
+          [pubkey],
+          nostrService
+        );
+        
+        // Check if key distribution was successful
+        const distributionResult = keyDistribution.find(result => result.member === pubkey);
+        if (!distributionResult || !distributionResult.success) {
+          Alert.alert('Error', 'Failed to distribute encryption key to invited user');
+          return;
+        }
+        
+        // Also send the regular invitation message
+        await nostrService.inviteToPrivateGroup(channelId, pubkey, inviteMessage);
+        
+        Alert.alert('Success', 'Encrypted channel invitation and encryption key sent successfully!');
+      } else {
+        // Regular private channel invitation
+        await nostrService.inviteToPrivateGroup(channelId, pubkey, inviteMessage);
+        Alert.alert('Success', 'Invitation sent successfully!');
+      }
       setShowInviteModal(false);
       setInviteePubkey('');
       setInviteMessage('');
@@ -785,10 +992,18 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
     const operatorStatus = userPermissions.isOperator ? 'Yes' : 'No';
     const creator = channelInfo?.creator?.substring(0, 16) + '...' || 'Unknown';
     const topic = channelTopic || 'No topic set';
+    const protocolName = channelProtocol === 'nip29' ? 'NIP-29 (Managed Group)' : 
+                        channelProtocol === 'private_nip28' ? 'Private NIP-28 (Basic Privacy)' : 
+                        'Public Channel';
+    const protocolDescription = channelProtocol === 'nip29' ? 
+                               'Relay-managed with full admin controls' :
+                               channelProtocol === 'private_nip28' ? 
+                               'Invitation-only access, plain text messages' :
+                               'Public channel on Nostr network';
     
     Alert.alert(
       'Channel Info',
-      `Channel: #${channelName}\nCreator: ${creator}\nTopic: ${topic}\nMessages: ${messages.length}\nYou are operator: ${operatorStatus}`,
+      `Channel: #${channelName}\nProtocol: ${protocolName}\nFeatures: ${protocolDescription}\nCreator: ${creator}\nTopic: ${topic}\nMessages: ${messages.length}\nYou are operator: ${operatorStatus}`,
       [{ text: 'OK' }]
     );
   };
@@ -825,11 +1040,45 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
   };
 
   const showHelp = () => {
+    const protocolInfo = channelProtocol === 'nip29' ? 
+      '\n\n🏛️ NIP-29 Group - REAL Moderation:\n• Kick/ban commands ACTUALLY work (both permanently remove)\n• Relay enforces all admin actions\n• Users are truly removed/blocked\n• Operator privileges have real power' :
+      channelProtocol === 'private_nip28' ? 
+        '\n\n⚠️ Private NIP-28 Channel - FAKE Moderation:\n• Kick/ban commands are visual only\n• No real enforcement - users can still message\n• Encrypted invitations, plain text messages\n• Create NIP-29 group for real moderation' :
+        '\n\n# Public Channel - FAKE Moderation:\n• Kick/ban commands are visual only\n• No real enforcement - users can still message\n• Anyone can join and participate\n• Create NIP-29 group for real moderation';
+    
     const operatorCommands = userPermissions.isOperator ? 
-      '\n\nOperator Commands:\n/topic <text> - Set channel topic\n/kick <user> [reason] - Kick user\n/ban <user> [reason] - Ban user\n/op <user> - Grant operator status\n/deop <user> - Remove operator status' : 
+      (channelProtocol === 'nip29' ? 
+        '\n\n🛡️ Operator Commands (ENFORCED):\n/topic [text] - Set/view channel topic\n/kick [user] [reason] - Permanently remove user\n/ban [user] [reason] - Permanently ban user\n/op [user] - Grant real operator status\n/deop [user] - Remove real operator status' :
+        '\n\n⚠️ Operator Commands (VISUAL ONLY):\n/topic [text] - Set channel topic\n/kick [user] [reason] - Fake removal (no effect)\n/ban [user] [reason] - Fake ban (no effect)\n/op [user] - Fake op status (no power)\n/deop [user] - Fake deop (no effect)\n\n⚠️ These don\'t actually work in non-NIP-29 groups!'
+      ) : 
       '';
     
-    const helpContent = `📋 Available Commands\n\nBasic Commands:\n/users - List users\n/msg <username|pubkey> <message> - Send private message\n/help - Show this help\n\nBot Commands:\n!help - Show bot help\n!weather <location> - Get weather\n!roll <dice> - Roll dice${operatorCommands}`;
+    const helpContent = `📋 IRC on Nostr - Command Reference
+
+🔧 IRC Commands (8 total):
+/help - Show this IRC command help
+/users - List active channel users
+/msg [username|pubkey|npub] [message] - Send private message
+/topic [text] - Set/view channel topic${operatorCommands ? '' : ' (operators only)'}
+/kick [user] [reason] - Remove user${operatorCommands ? '' : ' (operators only)'}
+/ban [user] [reason] - Ban user${operatorCommands ? '' : ' (operators only)'}
+/op [user] - Grant operator status${operatorCommands ? '' : ' (operators only)'}
+/deop [user] - Remove operator status${operatorCommands ? '' : ' (operators only)'}
+
+🤖 Bot Commands (32 total):
+• Helper: !help, !commands, !about, !time
+• Stats: !stats, !uptime  
+• Weather: !weather, !forecast
+• Games: !roll, !flip, !8ball, !rps, !number
+• Poker: !poker, !solo, !join, !commit, !reveal, !start, !bet, !call, !check, !fold, !raise, !verify, !games, !hand, !chips, !status, !cards
+
+💡 Examples:
+• !help - Complete bot command reference
+• !weather New York - Get weather for New York  
+• !poker 100 4 - Start 4-player poker game
+• !roll 2d10+5 - Roll dice with modifier
+
+Total: 40 commands available${operatorCommands}${protocolInfo}`;
     
     // Add help as system message to chat
     const systemMessage = {
@@ -923,7 +1172,7 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
 
   const renderUserList = () => {
     // For private groups, show member list; for public channels, show active users
-    const displayUsers = isPrivate ? 
+    const displayUsers = isPrivateGroup ? 
       privateGroupMembers.map(pubkey => ({ 
         pubkey, 
         lastSeen: Date.now() / 1000, 
@@ -932,7 +1181,7 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
       })) : 
       Array.from(channelUsers.values()).sort((a, b) => b.lastSeen - a.lastSeen);
 
-    const title = isPrivate ? `Members (${displayUsers.length})` : `Users (${displayUsers.length})`;
+    const title = isPrivateGroup ? `Members (${displayUsers.length})` : `Users (${displayUsers.length})`;
 
     return (
       <View style={[styles.userListContainer, { backgroundColor: theme.cardBackgroundColor }]}>
@@ -941,7 +1190,7 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
             {title}
           </Text>
           <View style={styles.userListHeaderButtons}>
-            {isPrivate && (
+            {isPrivateGroup && (
               <TouchableOpacity 
                 onPress={() => {
                   setShowUserList(false);
@@ -965,21 +1214,21 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
               <View style={styles.userInfo}>
                 <Text style={[styles.userName, { color: theme.textColor }]}>
                   {item.isOperator && <Text style={[styles.operatorBadge, { color: theme.successColor }]}>@ </Text>}
-                  {isPrivate && item.isMember && <Text style={[styles.memberBadge, { color: theme.primaryColor }]}>👤 </Text>}
+                  {isPrivateGroup && item.isMember && <Text style={[styles.memberBadge, { color: theme.primaryColor }]}>👤 </Text>}
                   {getUserDisplayName(item.pubkey)}
                 </Text>
-                {!isPrivate && (
+                {!isPrivateGroup && (
                   <Text style={[styles.userLastSeen, { color: theme.secondaryTextColor }]}>
                     {nostrUtils.formatTimestamp(item.lastSeen)}
                   </Text>
                 )}
-                {isPrivate && (
+                {isPrivateGroup && (
                   <Text style={[styles.memberStatus, { color: theme.secondaryTextColor }]}>
                     {item.pubkey === nostrService.publicKey ? 'You' : 'Member'}
                   </Text>
                 )}
               </View>
-              {isPrivate && item.pubkey !== nostrService.publicKey && userPermissions.isOperator && (
+              {isPrivateGroup && item.pubkey !== nostrService.publicKey && userPermissions.isOperator && (
                 <TouchableOpacity
                   style={[styles.removeButton, { backgroundColor: theme.errorColor }]}
                   onPress={() => removeMemberFromGroup(item.pubkey)}

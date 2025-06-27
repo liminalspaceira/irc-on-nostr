@@ -176,6 +176,8 @@ const UserProfileScreen = ({ route, navigation, theme = THEMES.DARK }) => {
 
   const handleFollowToggle = async () => {
     try {
+      const wasFollowing = isFollowing;
+      
       if (isFollowing) {
         await nostrService.unfollowUser(userPubkey);
         setIsFollowing(false);
@@ -185,9 +187,20 @@ const UserProfileScreen = ({ route, navigation, theme = THEMES.DARK }) => {
         setIsFollowing(true);
         setFollowersCount(prev => prev + 1);
       }
+      
+      // Refresh follow info after successful operation to ensure fresh data
+      await Promise.all([
+        loadFollowInfo(),
+        checkIfFollowing()
+      ]);
+      
     } catch (error) {
       console.error('Error toggling follow:', error);
       Alert.alert('Error', `Failed to ${isFollowing ? 'unfollow' : 'follow'} user`);
+      
+      // Revert optimistic UI changes on error
+      setIsFollowing(isFollowing);
+      setFollowersCount(prev => wasFollowing ? prev + 1 : Math.max(0, prev - 1));
     }
   };
 

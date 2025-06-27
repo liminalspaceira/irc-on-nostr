@@ -23,6 +23,7 @@ import FollowListScreen from './screens/FollowListScreen';
 // Services
 import { nostrService } from './services/NostrService';
 import { botService } from './services/BotService';
+import { notificationService } from './services/NotificationService';
 import { nostrUtils } from './utils/nostrUtils';
 import { STORAGE_KEYS, THEMES } from './utils/constants';
 
@@ -243,6 +244,15 @@ export default function App() {
       } catch (error) {
         console.error('⚠️ Bot service initialization failed:', error);
         // Continue without bots
+      }
+
+      // Initialize notification service
+      try {
+        await notificationService.initialize();
+        console.log('✅ Notification service initialized');
+      } catch (error) {
+        console.error('⚠️ Notification service initialization failed:', error);
+        // Continue without notifications
       }
       
       console.log('✅ App initialization complete');
