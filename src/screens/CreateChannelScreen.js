@@ -8,7 +8,9 @@ import {
   Alert,
   ScrollView,
   ActivityIndicator,
-  Modal
+  Modal,
+  Dimensions,
+  Linking
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { nostrService } from '../services/NostrService';
@@ -18,8 +20,8 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
   const [channelName, setChannelName] = useState('');
   const [channelDescription, setChannelDescription] = useState('');
   const [channelPicture, setChannelPicture] = useState('');
-  const [channelType, setChannelType] = useState('public'); // 'public' or 'private'
-  const [privateGroupProtocol, setPrivateGroupProtocol] = useState('private_nip28'); // 'private_nip28', 'encrypted', or 'nip29'
+  const [channelType, setChannelType] = useState('public'); // 'public', 'private', or 'nip29'
+  const [privateChannelProtocol, setPrivateChannelProtocol] = useState('private_nip28'); // 'private_nip28', 'encrypted', or 'nip29'
   const [isCreating, setIsCreating] = useState(false);
   
   // Modal states
@@ -30,6 +32,7 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
     buttons: [],
     type: 'info' // 'info', 'success', 'error'
   });
+  
 
   const validateChannelName = (name) => {
     // Remove # if user types it
@@ -95,19 +98,53 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
       console.log(`🚀 Starting ${channelType} channel creation...`);
       
       let event;
-      if (channelType === 'private') {
-        // Create private group with selected protocol
-        if (privateGroupProtocol === 'nip29') {
-          event = await nostrService.createNIP29Group(
-            cleanName,
-            channelDescription.trim() || `Private group: ${cleanName}`,
-            channelPicture.trim()
+      if (channelType === 'nip29') {
+        // Create NIP-29 group via external website
+        console.log('🌐 Opening NIP-29 group creation website...');
+        console.log('📝 User wants to create:');
+        console.log(`   Group name: ${cleanName}`);
+        console.log(`   Description: ${channelDescription.trim() || `NIP-29 group: ${cleanName}`}`);
+        
+        showAlert(
+            'Create NIP-29 Group',
+            `Opening the NIP-29 group creation form in your browser.\n\n📝 Suggested details:\n• Group name: "${cleanName}"\n• Description: "${channelDescription.trim() || `Private channel: ${cleanName}`}"\n\nAfter creating the group, return here and use "Join Channel" to join it.`,
+            [
+              {
+                text: 'Open Form',
+                onPress: async () => {
+                  closeModal();
+                  try {
+                    await Linking.openURL('https://relay.groups.nip29.com/');
+                    
+                    // Show follow-up instructions after browser opens
+                    setTimeout(() => {
+                      showAlert(
+                        'Next Steps',
+                        `After creating your NIP-29 group:\n\n1. Complete the form with your group details\n2. Solve the CAPTCHA verification\n3. Copy the Group ID from the confirmation\n4. Return to this app\n5. Use "Join Channel" and enter the Group ID\n\nYou'll then be able to use all NIP-29 moderation features!`,
+                        [{ text: 'Got it!' }],
+                        'success'
+                      );
+                    }, 1000);
+                  } catch (error) {
+                    console.error('Error opening browser:', error);
+                    showAlert('Error', 'Failed to open the NIP-29 group creation form.', [], 'error');
+                  }
+                }
+              },
+              {
+                text: 'Cancel',
+                onPress: () => closeModal()
+              }
+            ],
+            'info'
           );
-        } else if (privateGroupProtocol === 'encrypted') {
-          // Real encrypted group with shared secret
+          return;
+        } else if (channelType === 'private') {
+        if (privateChannelProtocol === 'encrypted') {
+          // Real encrypted channel with shared secret
           event = await nostrService.createRealEncryptedGroup(
             cleanName,
-            channelDescription.trim() || `Encrypted group: ${cleanName}`,
+            channelDescription.trim() || `Encrypted channel: ${cleanName}`,
             channelPicture.trim(),
             [] // No initial members for now - could add member selection UI
           );
@@ -115,7 +152,7 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
           // Private NIP-28 channel (basic privacy flag)
           event = await nostrService.createPrivateGroup(
             cleanName,
-            channelDescription.trim() || `Private group: ${cleanName}`,
+            channelDescription.trim() || `Private channel: ${cleanName}`,
             channelPicture.trim()
           );
         }
@@ -130,20 +167,20 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
       
       console.log('✅ Channel created successfully:', event.id);
       
-      const channelTypeText = channelType === 'private' ? 'Private group' : 'Channel';
+      const channelTypeText = channelType === 'nip29' ? 'NIP-29 group' : channelType === 'private' ? 'Private channel' : 'Channel';
       showAlert(
         'Success!', 
         `${channelTypeText} "${cleanName}" created successfully!`,
         [
           {
-            text: `Join ${channelType === 'private' ? 'Group' : 'Channel'}`,
+            text: `Join Channel`,
             onPress: () => {
               closeModal();
               navigation.replace('Channel', {
                 channelId: event.id,
                 channelName: cleanName,
                 isPrivate: channelType === 'private',
-                protocol: channelType === 'private' ? privateGroupProtocol : 'public'
+                protocol: channelType === 'nip29' ? 'nip29' : channelType === 'private' ? privateChannelProtocol : 'public'
               });
             }
           }
@@ -153,7 +190,7 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
       
     } catch (error) {
       console.error('❌ Failed to create channel:', error);
-      showAlert('Error', `Failed to create ${channelType} group. Please try again.`, [], 'error');
+      showAlert('Error', `Failed to create ${channelType} channel. Please try again.`, [], 'error');
     } finally {
       setIsCreating(false);
     }
@@ -179,7 +216,14 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
           Create New Channel
         </Text>
         <Text style={[styles.subtitle, { color: theme.secondaryTextColor }]}>
-          Set up a new {channelType} chat {channelType === 'private' ? 'group' : 'channel'} on Nostr
+          {channelType === 'public' 
+            ? 'Create a public channel anyone can discover and join'
+            : channelType === 'nip29'
+            ? 'Create a managed NIP-29 group with real moderation powers'
+            : channelType === 'private' && privateChannelProtocol === 'encrypted'
+            ? 'Create an encrypted channel with end-to-end privacy'
+            : 'Create an invitation-only private channel'
+          }
         </Text>
       </View>
 
@@ -232,50 +276,75 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
                 styles.typeButtonText,
                 { color: channelType === 'private' ? 'white' : theme.textColor }
               ]}>
-                Private Group
+                Private Channel
+              </Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity
+              style={[
+                styles.typeButton,
+                {
+                  backgroundColor: channelType === 'nip29' ? theme.primaryColor : theme.surfaceColor,
+                  borderColor: channelType === 'nip29' ? theme.primaryColor : theme.borderColor
+                }
+              ]}
+              onPress={() => setChannelType('nip29')}
+            >
+              <Ionicons 
+                name="settings-outline" 
+                size={20} 
+                color={channelType === 'nip29' ? 'white' : theme.secondaryTextColor} 
+              />
+              <Text style={[
+                styles.typeButtonText,
+                { color: channelType === 'nip29' ? 'white' : theme.textColor }
+              ]}>
+                NIP-29 Group
               </Text>
             </TouchableOpacity>
           </View>
           <Text style={[styles.helpText, { color: theme.secondaryTextColor }]}>
             {channelType === 'public' 
               ? 'Anyone can discover and join this channel'
-              : 'Invitation-only encrypted group chat'
+              : channelType === 'nip29'
+              ? 'Relay-managed group with real moderation powers (public)'
+              : 'Invitation-only encrypted channel chat'
             }
           </Text>
         </View>
 
-        {/* Private Group Protocol Selection */}
+        {/* Private Channel Protocol Selection */}
         {channelType === 'private' && (
           <View style={styles.inputGroup}>
             <Text style={[styles.label, { color: theme.textColor }]}>
-              Group Protocol *
+              Channel Protocol *
             </Text>
             <View style={styles.protocolSelectionContainer}>
               <TouchableOpacity
                 style={[
                   styles.protocolButton,
                   {
-                    backgroundColor: privateGroupProtocol === 'private_nip28' ? theme.warningColor : theme.surfaceColor,
-                    borderColor: privateGroupProtocol === 'private_nip28' ? theme.warningColor : theme.borderColor
+                    backgroundColor: privateChannelProtocol === 'private_nip28' ? theme.warningColor : theme.surfaceColor,
+                    borderColor: privateChannelProtocol === 'private_nip28' ? theme.warningColor : theme.borderColor
                   }
                 ]}
-                onPress={() => setPrivateGroupProtocol('private_nip28')}
+                onPress={() => setPrivateChannelProtocol('private_nip28')}
               >
                 <Ionicons 
                   name="eye-off-outline" 
                   size={18} 
-                  color={privateGroupProtocol === 'private_nip28' ? 'white' : theme.secondaryTextColor} 
+                  color={privateChannelProtocol === 'private_nip28' ? 'white' : theme.secondaryTextColor} 
                 />
                 <View style={styles.protocolInfo}>
                   <Text style={[
                     styles.protocolButtonText,
-                    { color: privateGroupProtocol === 'private_nip28' ? 'white' : theme.textColor }
+                    { color: privateChannelProtocol === 'private_nip28' ? 'white' : theme.textColor }
                   ]}>
                     Private NIP-28 (Basic)
                   </Text>
                   <Text style={[
                     styles.protocolSubtext,
-                    { color: privateGroupProtocol === 'private_nip28' ? 'rgba(255,255,255,0.8)' : theme.secondaryTextColor }
+                    { color: privateChannelProtocol === 'private_nip28' ? 'rgba(255,255,255,0.8)' : theme.secondaryTextColor }
                   ]}>
                     Invitation-only • Fake moderation
                   </Text>
@@ -286,139 +355,168 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
                 style={[
                   styles.protocolButton,
                   {
-                    backgroundColor: privateGroupProtocol === 'encrypted' ? theme.successColor : theme.surfaceColor,
-                    borderColor: privateGroupProtocol === 'encrypted' ? theme.successColor : theme.borderColor
+                    backgroundColor: privateChannelProtocol === 'encrypted' ? theme.successColor : theme.surfaceColor,
+                    borderColor: privateChannelProtocol === 'encrypted' ? theme.successColor : theme.borderColor
                   }
                 ]}
-                onPress={() => setPrivateGroupProtocol('encrypted')}
+                onPress={() => setPrivateChannelProtocol('encrypted')}
               >
                 <Ionicons 
                   name="shield-checkmark-outline" 
                   size={18} 
-                  color={privateGroupProtocol === 'encrypted' ? 'white' : theme.secondaryTextColor} 
+                  color={privateChannelProtocol === 'encrypted' ? 'white' : theme.secondaryTextColor} 
                 />
                 <View style={styles.protocolInfo}>
                   <Text style={[
                     styles.protocolButtonText,
-                    { color: privateGroupProtocol === 'encrypted' ? 'white' : theme.textColor }
+                    { color: privateChannelProtocol === 'encrypted' ? 'white' : theme.textColor }
                   ]}>
                     Encrypted (Real)
                   </Text>
                   <Text style={[
                     styles.protocolSubtext,
-                    { color: privateGroupProtocol === 'encrypted' ? 'rgba(255,255,255,0.8)' : theme.secondaryTextColor }
+                    { color: privateChannelProtocol === 'encrypted' ? 'rgba(255,255,255,0.8)' : theme.secondaryTextColor }
                   ]}>
                     End-to-end encrypted • Real privacy
                   </Text>
                 </View>
               </TouchableOpacity>
               
-              <TouchableOpacity
-                style={[
-                  styles.protocolButton,
-                  {
-                    backgroundColor: privateGroupProtocol === 'nip29' ? theme.primaryColor : theme.surfaceColor,
-                    borderColor: privateGroupProtocol === 'nip29' ? theme.primaryColor : theme.borderColor
-                  }
-                ]}
-                onPress={() => setPrivateGroupProtocol('nip29')}
-              >
-                <Ionicons 
-                  name="settings-outline" 
-                  size={18} 
-                  color={privateGroupProtocol === 'nip29' ? 'white' : theme.secondaryTextColor} 
-                />
-                <View style={styles.protocolInfo}>
-                  <Text style={[
-                    styles.protocolButtonText,
-                    { color: privateGroupProtocol === 'nip29' ? 'white' : theme.textColor }
-                  ]}>
-                    NIP-29 (Managed)
-                  </Text>
-                  <Text style={[
-                    styles.protocolSubtext,
-                    { color: privateGroupProtocol === 'nip29' ? 'rgba(255,255,255,0.8)' : theme.secondaryTextColor }
-                  ]}>
-                    Relay-based • Full moderation
-                  </Text>
-                </View>
-              </TouchableOpacity>
             </View>
             <Text style={[styles.helpText, { color: theme.secondaryTextColor }]}>
-              {privateGroupProtocol === 'private_nip28' 
-                ? 'Encrypted invitations, plain text messages. No moderation. Use Encrypted or NIP-29 for real features.'
-                : privateGroupProtocol === 'encrypted'
-                ? 'All messages encrypted with shared secret. Real end-to-end privacy. No moderation capabilities.'
-                : 'Relay-managed groups with admin controls like kick/ban. Requires NIP-29 compatible relays.'
+              {privateChannelProtocol === 'private_nip28' 
+                ? 'Encrypted invitations, plain text messages. No moderation. Use Encrypted for real features.'
+                : 'All messages encrypted with shared secret. Real end-to-end privacy. No moderation capabilities.'
               }
             </Text>
           </View>
         )}
         <View style={styles.inputGroup}>
-          <Text style={[styles.label, { color: theme.textColor }]}>
-            Channel Name *
+          <Text style={[styles.label, { 
+            color: channelType === 'nip29' 
+              ? theme.borderColor 
+              : theme.textColor 
+          }]}>
+            Channel Name {channelType === 'nip29' ? '' : '*'}
           </Text>
           <View style={styles.nameInputContainer}>
-            <Text style={[styles.hashSymbol, { color: theme.secondaryTextColor }]}>
+            <Text style={[styles.hashSymbol, { 
+              color: channelType === 'nip29' 
+                ? theme.borderColor 
+                : theme.secondaryTextColor 
+            }]}>
               #
             </Text>
             <TextInput
               style={[styles.textInput, { 
-                backgroundColor: theme.surfaceColor,
-                color: theme.textColor,
-                borderColor: theme.borderColor
+                backgroundColor: channelType === 'nip29' 
+                  ? theme.borderColor + '20' 
+                  : theme.surfaceColor,
+                color: channelType === 'nip29' 
+                  ? theme.borderColor 
+                  : theme.textColor,
+                borderColor: channelType === 'nip29' 
+                  ? theme.borderColor 
+                  : theme.borderColor
               }]}
               value={channelName}
               onChangeText={handleChannelNameChange}
-              placeholder="general"
-              placeholderTextColor={theme.secondaryTextColor}
+              placeholder={channelType === 'nip29' 
+                ? "Set on relay website" 
+                : "general"
+              }
+              placeholderTextColor={channelType === 'nip29' 
+                ? theme.borderColor 
+                : theme.secondaryTextColor
+              }
+              editable={!(channelType === 'nip29')}
               maxLength={32}
               autoCapitalize="none"
               autoCorrect={false}
             />
           </View>
           <Text style={[styles.helpText, { color: theme.secondaryTextColor }]}>
-            Letters, numbers, underscores, and hyphens only
+            {channelType === 'nip29' 
+              ? 'Channel details will be set on the relay website'
+              : 'Letters, numbers, underscores, and hyphens only'
+            }
           </Text>
         </View>
 
         <View style={styles.inputGroup}>
-          <Text style={[styles.label, { color: theme.textColor }]}>
+          <Text style={[styles.label, { 
+            color: channelType === 'nip29' 
+              ? theme.borderColor 
+              : theme.textColor 
+          }]}>
             Description
           </Text>
           <TextInput
             style={[styles.textInput, styles.multilineInput, { 
-              backgroundColor: theme.surfaceColor,
-              color: theme.textColor,
-              borderColor: theme.borderColor
+              backgroundColor: channelType === 'nip29' 
+                ? theme.borderColor + '20' 
+                : theme.surfaceColor,
+              color: channelType === 'nip29' 
+                ? theme.borderColor 
+                : theme.textColor,
+              borderColor: channelType === 'nip29' 
+                ? theme.borderColor 
+                : theme.borderColor
             }]}
             value={channelDescription}
             onChangeText={setChannelDescription}
-            placeholder="What's this channel about?"
-            placeholderTextColor={theme.secondaryTextColor}
+            placeholder={channelType === 'nip29' 
+              ? "Set on relay website" 
+              : "What's this channel about?"
+            }
+            placeholderTextColor={channelType === 'nip29' 
+              ? theme.borderColor 
+              : theme.secondaryTextColor
+            }
+            editable={!(channelType === 'nip29')}
             multiline
             numberOfLines={3}
             maxLength={200}
           />
           <Text style={[styles.characterCount, { color: theme.secondaryTextColor }]}>
-            {channelDescription.length}/200
+            {channelType === 'nip29' 
+              ? 'Set on website' 
+              : `${channelDescription.length}/200`
+            }
           </Text>
         </View>
 
         <View style={styles.inputGroup}>
-          <Text style={[styles.label, { color: theme.textColor }]}>
+          <Text style={[styles.label, { 
+            color: channelType === 'nip29' 
+              ? theme.borderColor 
+              : theme.textColor 
+          }]}>
             Channel Picture URL (optional)
           </Text>
           <TextInput
             style={[styles.textInput, { 
-              backgroundColor: theme.surfaceColor,
-              color: theme.textColor,
-              borderColor: theme.borderColor
+              backgroundColor: channelType === 'nip29' 
+                ? theme.borderColor + '20' 
+                : theme.surfaceColor,
+              color: channelType === 'nip29' 
+                ? theme.borderColor 
+                : theme.textColor,
+              borderColor: channelType === 'nip29' 
+                ? theme.borderColor 
+                : theme.borderColor
             }]}
             value={channelPicture}
             onChangeText={setChannelPicture}
-            placeholder="https://example.com/image.jpg"
-            placeholderTextColor={theme.secondaryTextColor}
+            placeholder={channelType === 'nip29' 
+              ? "Set on relay website" 
+              : "https://example.com/image.jpg"
+            }
+            placeholderTextColor={channelType === 'nip29' 
+              ? theme.borderColor 
+              : theme.secondaryTextColor
+            }
+            editable={!(channelType === 'nip29')}
             keyboardType="url"
             autoCapitalize="none"
             autoCorrect={false}
@@ -429,10 +527,12 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
       <View style={styles.footer}>
         <TouchableOpacity
           style={[styles.createButton, { 
-            backgroundColor: channelName.trim() ? theme.primaryColor : theme.borderColor 
+            backgroundColor: (channelName.trim() || (channelType === 'nip29')) 
+              ? theme.primaryColor 
+              : theme.borderColor 
           }]}
           onPress={createChannel}
-          disabled={!channelName.trim() || isCreating}
+          disabled={!(channelName.trim() || (channelType === 'nip29')) || isCreating}
         >
           {isCreating ? (
             <ActivityIndicator size="small" color="white" />
@@ -460,17 +560,17 @@ const CreateChannelScreen = ({ navigation, theme = THEMES.DARK }) => {
       <View style={styles.infoBox}>
         <View style={[styles.infoContainer, { backgroundColor: theme.cardBackgroundColor }]}>
           <Ionicons 
-            name={channelType === 'private' ? "shield-checkmark" : "information-circle"} 
+            name={channelType === 'nip29' ? "settings" : channelType === 'private' ? "shield-checkmark" : "information-circle"} 
             size={20} 
             color={theme.primaryColor} 
           />
           <Text style={[styles.infoText, { color: theme.secondaryTextColor }]}>
-            {channelType === 'private' 
-              ? (privateGroupProtocol === 'nip29' 
-                  ? 'Your NIP-29 group will be relay-managed with full moderation capabilities. You\'ll have admin controls to manage members, delete messages, and enforce rules.'
-                  : privateGroupProtocol === 'encrypted'
-                  ? 'Your Encrypted group will use shared secrets for real end-to-end encryption. All messages fully encrypted. Maximum privacy with no moderation.'
-                  : 'Your Private NIP-28 channel has encrypted invitations but plain text messages. No real moderation. For full features, use Encrypted or NIP-29.'
+            {channelType === 'nip29' 
+              ? 'Your NIP-29 group will be relay-managed with full moderation capabilities. You\'ll have admin controls to manage members, delete messages, and enforce rules.'
+              : channelType === 'private' 
+              ? (privateChannelProtocol === 'encrypted'
+                  ? 'Your Encrypted channel will use shared secrets for real end-to-end encryption. All messages fully encrypted. Maximum privacy with no moderation.'
+                  : 'Your Private NIP-28 channel has encrypted invitations but plain text messages. No real moderation. For full features, use Encrypted.'
                 )
               : 'Your channel will be public and discoverable by anyone on the Nostr network. You\'ll automatically become the channel operator.'
             }

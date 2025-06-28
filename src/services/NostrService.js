@@ -5,6 +5,7 @@ import { cacheService } from './CacheService';
 import { groupEncryptionService } from './GroupEncryptionService';
 import { 
   DEFAULT_RELAYS, 
+  NIP29_RELAYS,
   STORAGE_KEYS, 
   EVENT_KINDS,
   ERROR_MESSAGES 
@@ -614,6 +615,60 @@ class NostrService {
     }
   }
 
+  // NIP-29 Group Invitation
+  async inviteToNIP29Group(groupId, inviteePubkey, personalMessage = '') {
+    try {
+      console.log(`🏛️ Inviting ${inviteePubkey.substring(0, 8)}... to NIP-29 group ${groupId}`);
+      
+      // Try to get the group name by querying NIP-29 groups
+      let groupName = null;
+      try {
+        const metadata = await this.getNIP29GroupMetadata(groupId);
+        groupName = metadata.name || null;
+      } catch (error) {
+        console.warn('Could not fetch NIP-29 group name for invitation:', error);
+      }
+      
+      // Get NIP-29 relays
+      const nip29RelaysStored = await AsyncStorage.getItem('nip29_relays');
+      const nip29Relays = nip29RelaysStored ? JSON.parse(nip29RelaysStored) : NIP29_RELAYS;
+      
+      if (nip29Relays.length === 0) {
+        throw new Error('No NIP-29 relays configured');
+      }
+      
+      // Create NIP-29 invitation event (kind 9009)
+      const inviteEvent = {
+        kind: 9009, // NIP-29 group invitation
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['h', groupId], // group identifier
+          ['p', inviteePubkey], // invitee pubkey
+        ],
+        content: personalMessage || `You've been invited to join the NIP-29 group: ${groupName || groupId}`
+      };
+
+      // Sign and publish the event to NIP-29 relays
+      const signedEvent = finalizeEvent(inviteEvent, this.privateKey);
+      
+      // Publish to NIP-29 relays specifically
+      await Promise.all(nip29Relays.map(async (relayUrl) => {
+        try {
+          await this.pool.publish([relayUrl], signedEvent);
+          console.log(`✅ NIP-29 invitation published to ${relayUrl}`);
+        } catch (error) {
+          console.warn(`⚠️ Failed to publish invitation to ${relayUrl}:`, error);
+        }
+      }));
+      
+      console.log('✅ NIP-29 group invitation sent');
+      return true;
+    } catch (error) {
+      console.error('Error inviting to NIP-29 group:', error);
+      throw error;
+    }
+  }
+
   // NIP-29 Group Creation
   async createNIP29Group(name, about, picture = '') {
     try {
@@ -621,7 +676,7 @@ class NostrService {
       
       // Get NIP-29 relays from storage
       const nip29RelaysStored = await AsyncStorage.getItem('nip29_relays');
-      const nip29Relays = nip29RelaysStored ? JSON.parse(nip29RelaysStored) : ['wss://relay.groups.nip29.com'];
+      const nip29Relays = nip29RelaysStored ? JSON.parse(nip29RelaysStored) : NIP29_RELAYS;
       
       if (nip29Relays.length === 0) {
         throw new Error('No NIP-29 relays configured. Please add a NIP-29 relay in settings.');
@@ -2918,7 +2973,7 @@ class NostrService {
       
       // Get NIP-29 relays from storage
       const nip29RelaysStored = await AsyncStorage.getItem('nip29_relays');
-      const nip29Relays = nip29RelaysStored ? JSON.parse(nip29RelaysStored) : ['wss://relay.groups.nip29.com'];
+      const nip29Relays = nip29RelaysStored ? JSON.parse(nip29RelaysStored) : NIP29_RELAYS;
       
       console.log('💾 NIP-29 relays from storage:', nip29RelaysStored);
       console.log('🔗 Using NIP-29 relays:', nip29Relays);
@@ -2940,92 +2995,87 @@ class NostrService {
         const groups = [];
         let timeoutId;
         
-        // Query for NIP-29 groups created by the current user
-        const filters = {
-          kinds: [9007], // NIP-29 group creation events
-          authors: [this.publicKey], // Only groups created by current user
-          limit: limit
-        };
+        // Query for NIP-29 groups the user has created OR joined
+        const filters = [
+          {
+            kinds: [9007], // NIP-29 group creation events by current user
+            authors: [this.publicKey], // Groups YOU CREATED
+            since: Math.floor(Date.now() / 1000) - (365 * 24 * 60 * 60), // Last year
+            limit: 20
+          },
+          {
+            kinds: [9021], // Join requests made by current user
+            authors: [this.publicKey], // Groups YOU JOINED
+            since: Math.floor(Date.now() / 1000) - (90 * 24 * 60 * 60), // Last 90 days
+            limit: 50
+          }
+        ];
         
         console.log('🔍 NIP-29 query filters:', filters);
         console.log('📡 Connecting to NIP-29 relays for subscription...');
+        console.log('🔑 Using public key:', this.publicKey);
+        
+        // Debug: Track what we find
+        let foundCreatedGroups = 0;
+        let foundJoinRequests = 0;
         
         const subscription = this.pool.subscribeMany(
           nip29Relays,
-          [filters],
+          filters,
           {
             onevent: (event) => {
               try {
-                console.log('🎉 ==> FOUND NIP-29 GROUP EVENT!');
+                console.log('🎉 ==> FOUND NIP-29 EVENT!');
                 console.log('   Event ID:', event.id.substring(0, 16) + '...');
                 console.log('   Event Kind:', event.kind);
                 console.log('   Event Author:', event.pubkey.substring(0, 16) + '...');
                 console.log('   Event Tags:', event.tags);
-                console.log('   Event Content:', event.content?.substring(0, 100) + '...');
                 
-                // Parse NIP-29 group event
-                const groupData = {
-                  id: event.id,
-                  kind: event.kind,
-                  name: '',
-                  about: '',
-                  picture: '',
-                  creator: event.pubkey,
-                  created_at: event.created_at,
-                  tags: event.tags || [],
-                  protocol: 'nip29',
-                  privacy: 'private'
-                };
-                
-                // Extract group info from tags
-                if (event.tags) {
-                  event.tags.forEach(tag => {
-                    if (tag[0] === 'name' && tag[1]) groupData.name = tag[1];
-                    if (tag[0] === 'about' && tag[1]) groupData.about = tag[1];
-                    if (tag[0] === 'picture' && tag[1]) groupData.picture = tag[1];
-                    if (tag[0] === 'd' && tag[1]) groupData.groupId = tag[1];
-                  });
-                }
-                
-                // Also try to parse from content if available
-                if (event.content) {
-                  try {
-                    const contentData = JSON.parse(event.content);
-                    if (contentData.name && !groupData.name) groupData.name = contentData.name;
-                    if (contentData.about && !groupData.about) groupData.about = contentData.about;
-                    if (contentData.picture && !groupData.picture) groupData.picture = contentData.picture;
-                  } catch (parseError) {
-                    // Content is not JSON, ignore
+                if (event.kind === 9007) {
+                  // Process group creation event (groups created by user)
+                  foundCreatedGroups++;
+                  console.log(`📝 Processing group YOU CREATED (#${foundCreatedGroups}):`, event.id.substring(0, 8));
+                  console.log('   Group tags:', event.tags);
+                  this.processNIP29GroupEvent(event, groups);
+                  
+                } else if (event.kind === 9021) {
+                  // Process join request - extract group ID and fetch group metadata
+                  foundJoinRequests++;
+                  console.log(`🔗 Processing group YOU JOINED (#${foundJoinRequests}):`, event.id.substring(0, 8));
+                  console.log('   Join request tags:', event.tags);
+                  
+                  const groupIdTag = event.tags?.find(tag => tag[0] === 'h');
+                  if (groupIdTag && groupIdTag[1]) {
+                    const groupId = groupIdTag[1];
+                    console.log(`🎯 Found join request for group: ${groupId}`);
+                    
+                    // Query for the actual group metadata (for groups you joined)
+                    this.fetchGroupFromJoinRequest(groupId, groups);
+                  } else {
+                    console.warn('⚠️ Join request missing group ID (h tag)');
                   }
                 }
                 
-                // Set fallback name if none found
-                if (!groupData.name) {
-                  groupData.name = `NIP-29 Group ${event.id.substring(0, 8)}`;
-                }
-                
-                console.log('✅ ==> SUCCESSFULLY PARSED NIP-29 GROUP:');
-                console.log('   Name:', groupData.name);
-                console.log('   About:', groupData.about);
-                console.log('   Protocol:', groupData.protocol);
-                console.log('   Privacy:', groupData.privacy);
-                console.log('   Group ID:', groupData.groupId);
-                
-                groups.push(groupData);
-                
               } catch (error) {
-                console.error('Error processing NIP-29 group event:', error);
+                console.error('Error processing NIP-29 event:', error);
               }
             },
             oneose: () => {
               console.log('📨 ==> END OF STORED NIP-29 GROUPS');
-              console.log('📅 Total NIP-29 groups found:', groups.length);
-              if (timeoutId) {
-                clearTimeout(timeoutId);
-              }
-              subscription.close();
-              console.log('🎆 ==> RETURNING', groups.length, 'NIP-29 GROUPS FROM RELAYS');
-              resolve(groups);
+              console.log('📊 Discovery summary:');
+              console.log(`   - Groups you created: ${foundCreatedGroups}`);
+              console.log(`   - Join requests found: ${foundJoinRequests}`);
+              console.log(`   - Groups from relay queries: ${groups.length}`);
+              
+              // Load groups from local storage and fetch their metadata
+              this.loadJoinedGroupsFromStorage(groups).then(() => {
+                if (timeoutId) {
+                  clearTimeout(timeoutId);
+                }
+                subscription.close();
+                console.log(`🎆 ==> RETURNING ${groups.length} NIP-29 GROUPS (relay + local storage)`);
+                resolve(groups);
+              });
             }
           }
         );
@@ -3035,8 +3085,12 @@ class NostrService {
           console.log('⏰ ==> NIP-29 QUERY TIMEOUT REACHED (10 seconds)');
           console.log('📅 Groups found before timeout:', groups.length);
           subscription.close();
-          console.log('🚫 ==> RETURNING', groups.length, 'NIP-29 GROUPS DUE TO TIMEOUT');
-          resolve(groups);
+          
+          // Even on timeout, load groups from local storage
+          this.loadJoinedGroupsFromStorage(groups).then(() => {
+            console.log(`🚫 ==> RETURNING ${groups.length} NIP-29 GROUPS DUE TO TIMEOUT (after local storage)`);
+            resolve(groups);
+          });
         }, 10000); // 10 second timeout
       });
       
@@ -3046,14 +3100,676 @@ class NostrService {
     }
   }
 
+  // Helper method to fetch group metadata from join request
+  async fetchGroupFromJoinRequest(groupId, groups) {
+    try {
+      console.log(`🔍 Fetching group metadata for joined group: ${groupId}`);
+      
+      // Check if we already have this group in the list
+      const existingGroup = groups.find(g => g.groupId === groupId || g.id === groupId);
+      if (existingGroup) {
+        console.log(`✅ Group ${groupId} already in list`);
+        return;
+      }
+      
+      const nip29Relays = NIP29_RELAYS;
+      
+      const groupQuery = this.pool.subscribeMany(
+        nip29Relays,
+        [{
+          kinds: [9007], // Group creation events
+          '#d': [groupId], // Match group ID
+          limit: 1
+        }],
+        {
+          onevent: (groupEvent) => {
+            console.log(`🏛️ Found group metadata for joined group: ${groupId}`);
+            console.log('   Group event tags:', groupEvent.tags);
+            console.log('   Group event content:', groupEvent.content);
+            this.processNIP29GroupEvent(groupEvent, groups);
+          },
+          oneose: () => {
+            console.log(`📝 End of metadata query for group ${groupId}`);
+            groupQuery.close();
+          }
+        }
+      );
+      
+      // Close the query after 3 seconds if no results
+      setTimeout(() => {
+        groupQuery.close();
+        
+        // If no group metadata found, create a minimal entry
+        const existingAfterQuery = groups.find(g => g.groupId === groupId || g.id === groupId);
+        if (!existingAfterQuery) {
+          console.log(`⚠️ No metadata found for group ${groupId}, creating minimal entry`);
+          const minimalGroup = {
+            id: groupId,
+            kind: 9007,
+            name: `Group ${groupId}`,
+            about: `NIP-29 group (ID: ${groupId})`,
+            picture: '',
+            creator: 'unknown',
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [['d', groupId]],
+            protocol: 'nip29',
+            privacy: 'public',
+            groupId: groupId
+          };
+          groups.push(minimalGroup);
+          console.log(`✅ Added minimal group entry for ${groupId}`);
+        }
+      }, 3000);
+      
+    } catch (error) {
+      console.error('Error fetching group from join request:', error);
+    }
+  }
+
+  // Helper method to process NIP-29 group events
+  processNIP29GroupEvent(event, groups) {
+    try {
+      // Parse NIP-29 group event
+      const groupData = {
+        id: event.id,
+        kind: event.kind,
+        name: '',
+        about: '',
+        picture: '',
+        creator: event.pubkey,
+        created_at: event.created_at,
+        tags: event.tags || [],
+        protocol: 'nip29',
+        privacy: 'public'  // Default to public since relay.groups.nip29.com only supports public groups
+      };
+      
+      // Extract group info from tags
+      if (event.tags) {
+        event.tags.forEach(tag => {
+          if (tag[0] === 'name' && tag[1]) groupData.name = tag[1];
+          if (tag[0] === 'about' && tag[1]) groupData.about = tag[1];
+          if (tag[0] === 'picture' && tag[1]) groupData.picture = tag[1];
+          if (tag[0] === 'd' && tag[1]) groupData.groupId = tag[1];
+          // Check if group has private/public indicators
+          if (tag[0] === 'private' && tag[1] === 'true') groupData.privacy = 'private';
+          if (tag[0] === 'public' && tag[1] === 'true') groupData.privacy = 'public';
+        });
+      }
+      
+      // Also try to parse from content if available
+      if (event.content) {
+        try {
+          const contentData = JSON.parse(event.content);
+          if (contentData.name && !groupData.name) groupData.name = contentData.name;
+          if (contentData.about && !groupData.about) groupData.about = contentData.about;
+          if (contentData.picture && !groupData.picture) groupData.picture = contentData.picture;
+        } catch (parseError) {
+          // Content is not JSON, ignore
+        }
+      }
+      
+      // Set fallback name if none found
+      if (!groupData.name) {
+        groupData.name = `NIP-29 Group ${event.id.substring(0, 8)}`;
+      }
+      
+      console.log('✅ ==> SUCCESSFULLY PARSED NIP-29 GROUP:');
+      console.log('   Name:', groupData.name);
+      console.log('   About:', groupData.about);
+      console.log('   Protocol:', groupData.protocol);
+      console.log('   Privacy:', groupData.privacy);
+      console.log('   Group ID:', groupData.groupId);
+      
+      // Check if this group is already in the list (avoid duplicates)
+      const existingGroup = groups.find(g => g.id === groupData.id);
+      if (!existingGroup) {
+        groups.push(groupData);
+      }
+      
+    } catch (error) {
+      console.error('Error processing NIP-29 group event:', error);
+    }
+  }
+
+  // NIP-29 Group Joining Methods
+  async joinNIP29Group(groupId) {
+    try {
+      console.log(`🏛️ Sending join request for NIP-29 group: ${groupId}`);
+      
+      // Handle different group ID formats
+      let cleanGroupId = groupId.trim();
+      
+      // If it's a bech32 encoded naddr, decode it
+      if (cleanGroupId.startsWith('naddr1')) {
+        console.log('📝 Detected bech32 naddr format, using as-is for now');
+        // For now, we'll use the bech32 as-is, but NIP-29 typically expects hex IDs
+        // The relay should handle the conversion
+      }
+      
+      // If it contains the relay address, extract just the group ID
+      if (cleanGroupId.includes("'")) {
+        const parts = cleanGroupId.split("'");
+        if (parts.length > 1) {
+          cleanGroupId = parts[1];
+          console.log(`🔧 Extracted group ID from relay format: ${cleanGroupId}`);
+        }
+      }
+      
+      console.log(`🎯 Using group ID: ${cleanGroupId}`);
+      
+      // Ensure we're initialized
+      if (!this.isConnected) {
+        console.log('🔄 NostrService not connected, initializing...');
+        await this.initialize();
+      }
+      
+      // Get NIP-29 relays from storage
+      const nip29RelaysStored = await AsyncStorage.getItem('nip29_relays');
+      const nip29Relays = nip29RelaysStored ? JSON.parse(nip29RelaysStored) : NIP29_RELAYS;
+      
+      console.log(`📡 Using NIP-29 relays:`, nip29Relays);
+      
+      if (nip29Relays.length === 0) {
+        throw new Error('No NIP-29 relays configured');
+      }
+      
+      // Create NIP-29 join request event (kind 9021)
+      const joinEvent = {
+        kind: 9021, // NIP-29 join request
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['h', cleanGroupId], // group reference
+        ],
+        content: '' // Empty content for join requests
+      };
+      
+      console.log(`📝 Created join event:`, joinEvent);
+      
+      // Convert private key to proper format for finalizeEvent
+      if (!this.privateKey) {
+        throw new Error('No private key available for signing');
+      }
+      
+      const privateKeyBytes = new Uint8Array(
+        this.privateKey.match(/.{1,2}/g).map(byte => parseInt(byte, 16))
+      );
+      
+      // Sign and publish to NIP-29 relays
+      const finalEvent = finalizeEvent(joinEvent, privateKeyBytes);
+      
+      console.log(`✍️ Signed join event:`, finalEvent.id);
+      
+      let successCount = 0;
+      const publishPromises = [];
+      
+      for (const relay of nip29Relays) {
+        try {
+          console.log(`📤 Publishing join request to ${relay}...`);
+          const publishPromise = this.pool.publish([relay], finalEvent);
+          publishPromises.push(publishPromise);
+          console.log(`✅ Join request sent to ${relay}`);
+          successCount++;
+        } catch (relayError) {
+          console.warn(`⚠️ Failed to send join request to ${relay}:`, relayError.message);
+        }
+      }
+      
+      // Wait for all publish attempts to complete
+      try {
+        const results = await Promise.allSettled(publishPromises);
+        console.log(`📊 All publish attempts completed:`, results);
+        
+        // Check if any result indicates we're already a member
+        const alreadyMemberError = results.find(result => 
+          result.status === 'rejected' && 
+          result.reason?.message?.includes('already a member')
+        );
+        
+        if (alreadyMemberError) {
+          console.log(`✅ Already a member of group ${cleanGroupId}`);
+          return { alreadyMember: true, event: finalEvent };
+        }
+        
+      } catch (publishError) {
+        // Check if the error indicates we're already a member
+        if (publishError.message?.includes('already a member')) {
+          console.log(`✅ Already a member of group ${cleanGroupId}`);
+          return { alreadyMember: true, event: finalEvent };
+        }
+        console.warn(`⚠️ Some publish attempts failed:`, publishError);
+      }
+      
+      if (successCount === 0) {
+        throw new Error('Failed to send join request to any NIP-29 relay');
+      }
+      
+      console.log(`✅ Join request sent for group ${cleanGroupId} to ${successCount} relay(s)`);
+      
+      // Store the joined group locally for future discovery
+      await this.storeJoinedNIP29Group(cleanGroupId);
+      
+      return finalEvent;
+      
+    } catch (error) {
+      console.error('❌ Error joining NIP-29 group:', error);
+      throw error;
+    }
+  }
+
+
+  // Local storage for joined NIP-29 groups
+  async storeJoinedNIP29Group(groupId) {
+    try {
+      console.log(`💾 Storing joined NIP-29 group: ${groupId}`);
+      
+      const existingGroups = await AsyncStorage.getItem('joined_nip29_groups');
+      const joinedGroups = existingGroups ? JSON.parse(existingGroups) : [];
+      
+      // Add the group if not already stored
+      if (!joinedGroups.includes(groupId)) {
+        joinedGroups.push(groupId);
+        await AsyncStorage.setItem('joined_nip29_groups', JSON.stringify(joinedGroups));
+        console.log(`✅ Stored joined group ${groupId}, total: ${joinedGroups.length}`);
+      } else {
+        console.log(`📝 Group ${groupId} already stored`);
+      }
+    } catch (error) {
+      console.error('Error storing joined NIP-29 group:', error);
+    }
+  }
+
+  async getJoinedNIP29Groups() {
+    try {
+      const existingGroups = await AsyncStorage.getItem('joined_nip29_groups');
+      const joinedGroups = existingGroups ? JSON.parse(existingGroups) : [];
+      console.log(`📋 Retrieved ${joinedGroups.length} joined NIP-29 groups from storage:`, joinedGroups);
+      return joinedGroups;
+    } catch (error) {
+      console.error('Error retrieving joined NIP-29 groups:', error);
+      return [];
+    }
+  }
+
+  async loadJoinedGroupsFromStorage(existingGroups) {
+    try {
+      console.log('💾 Loading joined groups from local storage...');
+      
+      let joinedGroupIds = await this.getJoinedNIP29Groups();
+      
+      if (joinedGroupIds.length === 0) {
+        console.log('📝 No joined groups in local storage');
+        
+        // One-time migration: store the known group 87c25f that the user was using
+        console.log('🔄 Performing one-time migration for known group 87c25f');
+        await this.storeJoinedNIP29Group('87c25f');
+        
+        // Reload the joined groups after migration
+        joinedGroupIds = await this.getJoinedNIP29Groups();
+        console.log(`✅ Migration complete, now have ${joinedGroupIds.length} stored groups`);
+      }
+      
+      console.log(`🔍 Fetching metadata for ${joinedGroupIds.length} stored groups...`);
+      
+      // Fetch metadata for each stored group
+      const metadataPromises = joinedGroupIds.map(async (groupId) => {
+        // Check if we already have this group from relay queries
+        const existingGroup = existingGroups.find(g => g.groupId === groupId || g.id === groupId);
+        if (existingGroup) {
+          console.log(`✅ Group ${groupId} already loaded from relay`);
+          return;
+        }
+        
+        try {
+          console.log(`🔍 Fetching metadata for stored group: ${groupId}`);
+          const metadata = await this.getNIP29GroupMetadata(groupId);
+          
+          console.log(`📊 Metadata received for ${groupId}:`, metadata);
+          console.log(`📝 Group name from metadata: "${metadata.name}"`);
+          
+          const groupEntry = {
+            id: groupId,
+            kind: 9007,
+            name: metadata.name || `Group ${groupId}`,
+            about: metadata.about || `NIP-29 group (ID: ${groupId})`,
+            picture: metadata.picture || '',
+            creator: metadata.creator || 'unknown',
+            created_at: metadata.created_at || Math.floor(Date.now() / 1000),
+            tags: [['d', groupId]],
+            protocol: 'nip29',
+            privacy: 'public',
+            groupId: groupId
+          };
+          
+          existingGroups.push(groupEntry);
+          console.log(`✅ Added stored group: "${groupEntry.name}" (ID: ${groupId})`);
+          
+        } catch (error) {
+          console.warn(`⚠️ Failed to get metadata for stored group ${groupId}, adding minimal entry`);
+          
+          // Add minimal entry even if metadata fetch fails
+          const minimalEntry = {
+            id: groupId,
+            kind: 9007,
+            name: `Group ${groupId}`,
+            about: `NIP-29 group (ID: ${groupId})`,
+            picture: '',
+            creator: 'unknown',
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [['d', groupId]],
+            protocol: 'nip29',
+            privacy: 'public',
+            groupId: groupId
+          };
+          
+          existingGroups.push(minimalEntry);
+          console.log(`✅ Added minimal entry for stored group: ${groupId}`);
+        }
+      });
+      
+      await Promise.all(metadataPromises);
+      console.log(`✅ Finished loading ${joinedGroupIds.length} stored groups`);
+      
+    } catch (error) {
+      console.error('Error loading joined groups from storage:', error);
+    }
+  }
+
+  // Helper method to get NIP-29 group metadata
+  async getNIP29GroupMetadata(groupId) {
+    try {
+      console.log(`🔍 Fetching metadata for NIP-29 group: ${groupId}`);
+      
+      const nip29Relays = NIP29_RELAYS;
+      
+      return new Promise((resolve, reject) => {
+        let metadata = {};
+        let timeoutId;
+        
+        // Try multiple approaches to get group info
+        const queries = [
+          // Query 1: Group creation event with 'd' tag
+          { kinds: [9007], '#d': [groupId], limit: 1 },
+          // Query 2: Group creation event with 'h' tag (some NIP-29 implementations)
+          { kinds: [9007], '#h': [groupId], limit: 1 },
+          // Query 3: Group metadata events with 'd' tag
+          { kinds: [39000], '#d': [groupId], limit: 1 },
+          // Query 4: Group metadata events with 'h' tag
+          { kinds: [39000], '#h': [groupId], limit: 1 },
+          // Query 5: Recent messages to infer group activity
+          { kinds: [9], '#h': [groupId], limit: 1 }
+        ];
+        
+        let completedQueries = 0;
+        const totalQueries = queries.length;
+        
+        queries.forEach((filter, index) => {
+          const sub = this.pool.subscribeMany(
+            nip29Relays,
+            [filter],
+            {
+              onevent: (event) => {
+                console.log(`📝 Found metadata event type ${event.kind} for group ${groupId}`);
+                console.log(`🏷️ Event tags:`, event.tags);
+                console.log(`📄 Event content:`, event.content);
+                
+                if (event.kind === 9007) {
+                  // Group creation event
+                  event.tags?.forEach(tag => {
+                    if (tag[0] === 'name' && tag[1]) {
+                      metadata.name = tag[1];
+                      console.log(`🎯 Found group name in tags: "${tag[1]}"`);
+                    }
+                    if (tag[0] === 'about' && tag[1]) metadata.about = tag[1];
+                    if (tag[0] === 'picture' && tag[1]) metadata.picture = tag[1];
+                  });
+                  metadata.creator = event.pubkey;
+                  metadata.created_at = event.created_at;
+                } else if (event.kind === 39000) {
+                  // Group metadata event (alternative format)
+                  console.log(`📋 Processing kind 39000 metadata event`);
+                  event.tags?.forEach(tag => {
+                    if (tag[0] === 'name' && tag[1]) {
+                      metadata.name = tag[1];
+                      console.log(`🎯 Found group name in kind 39000 tags: "${tag[1]}"`);
+                    }
+                    if (tag[0] === 'about' && tag[1]) metadata.about = tag[1];
+                    if (tag[0] === 'picture' && tag[1]) metadata.picture = tag[1];
+                    if (tag[0] === 'title' && tag[1]) {
+                      metadata.name = tag[1]; // Some implementations use 'title' instead of 'name'
+                      console.log(`🎯 Found group title in kind 39000 tags: "${tag[1]}"`);
+                    }
+                  });
+                  if (!metadata.creator) metadata.creator = event.pubkey;
+                  if (!metadata.created_at) metadata.created_at = event.created_at;
+                  
+                  // Also try to parse from content
+                  if (event.content) {
+                    try {
+                      const contentData = JSON.parse(event.content);
+                      console.log(`📦 Parsed content data:`, contentData);
+                      if (contentData.name && !metadata.name) {
+                        metadata.name = contentData.name;
+                        console.log(`🎯 Found group name in content: "${contentData.name}"`);
+                      }
+                      if (contentData.about && !metadata.about) metadata.about = contentData.about;
+                      if (contentData.picture && !metadata.picture) metadata.picture = contentData.picture;
+                    } catch (e) {
+                      console.log('Content is not JSON, trying as plain text');
+                    }
+                  }
+                }
+              },
+              oneose: () => {
+                sub.close();
+                completedQueries++;
+                
+                if (completedQueries >= totalQueries) {
+                  if (timeoutId) clearTimeout(timeoutId);
+                  
+                  if (metadata.name || metadata.about) {
+                    console.log('✅ Found group metadata:', metadata);
+                    resolve(metadata);
+                  } else {
+                    console.log('❌ No metadata found for group');
+                    reject(new Error('No metadata found'));
+                  }
+                }
+              }
+            }
+          );
+        });
+        
+        // Timeout after 5 seconds
+        timeoutId = setTimeout(() => {
+          console.log('⏰ Group metadata query timeout');
+          if (metadata.name || metadata.about) {
+            resolve(metadata);
+          } else {
+            reject(new Error('Metadata query timeout'));
+          }
+        }, 5000);
+      });
+      
+    } catch (error) {
+      console.error('Error fetching group metadata:', error);
+      throw error;
+    }
+  }
+
   // NIP-29 Group Messaging Methods
+  async queryNIP29GroupMessages(groupId, limit = 100) {
+    try {
+      console.log(`🏛️ Querying NIP-29 group messages for group: ${groupId}`);
+      
+      // Get NIP-29 relays from storage
+      const nip29RelaysStored = await AsyncStorage.getItem('nip29_relays');
+      const nip29Relays = nip29RelaysStored ? JSON.parse(nip29RelaysStored) : NIP29_RELAYS;
+      
+      if (nip29Relays.length === 0) {
+        console.log('❌ No NIP-29 relays configured');
+        return [];
+      }
+      
+      return new Promise((resolve) => {
+        const messages = [];
+        let timeoutId;
+        
+        // Query for NIP-29 group messages (kind 9)
+        const filters = {
+          kinds: [9], // NIP-29 group messages
+          '#h': [groupId], // group reference tag
+          limit: limit
+        };
+        
+        console.log('🔍 NIP-29 message query filters:', filters);
+        
+        const subscription = this.pool.subscribeMany(
+          nip29Relays,
+          [filters],
+          {
+            onevent: (event) => {
+              try {
+                console.log('📨 Found NIP-29 message:', event.id.substring(0, 16) + '...');
+                
+                // Parse the message event
+                const message = {
+                  id: event.id,
+                  author: event.pubkey,
+                  content: event.content,
+                  timestamp: event.created_at,
+                  type: 'normal',
+                  protocol: 'nip29',
+                  groupId: groupId,
+                  tags: event.tags || []
+                };
+                
+                // Check for reply references
+                const replyTag = event.tags?.find(tag => tag[0] === 'e' && tag[3] === 'reply');
+                if (replyTag) {
+                  message.replyTo = replyTag[1];
+                }
+                
+                messages.push(message);
+                
+              } catch (error) {
+                console.error('Error processing NIP-29 message:', error);
+              }
+            },
+            oneose: () => {
+              console.log('📨 End of NIP-29 messages, found:', messages.length);
+              if (timeoutId) {
+                clearTimeout(timeoutId);
+              }
+              subscription.close();
+              
+              // Sort messages by timestamp
+              messages.sort((a, b) => a.timestamp - b.timestamp);
+              
+              console.log('✅ Returning', messages.length, 'NIP-29 messages');
+              resolve(messages);
+            }
+          }
+        );
+        
+        // Set timeout to prevent hanging
+        timeoutId = setTimeout(() => {
+          console.log('⏰ NIP-29 message query timeout');
+          subscription.close();
+          messages.sort((a, b) => a.timestamp - b.timestamp);
+          resolve(messages);
+        }, 10000);
+      });
+      
+    } catch (error) {
+      console.error('Error querying NIP-29 group messages:', error);
+      return [];
+    }
+  }
+
+  subscribeToNIP29Group(groupId, onMessage, onModeration) {
+    console.log(`🏛️ Setting up real-time subscription for NIP-29 group: ${groupId}`);
+    
+    const filters = {
+      kinds: [9, 9001, 9002, 9003], // Messages and moderation events
+      '#h': [groupId], // group reference tag
+      since: Math.floor(Date.now() / 1000) // Only new messages from now
+    };
+    
+    console.log('🔍 NIP-29 subscription filters:', filters);
+    
+    // Use NIP-29 relays instead of regular relays
+    const nip29Relays = NIP29_RELAYS;
+    console.log('📡 Subscribing to NIP-29 relays:', nip29Relays);
+    
+    const subscriptionId = Math.random().toString(36).substring(2, 8);
+    console.log(`🆔 NIP-29 subscription ID: ${subscriptionId}`);
+    
+    const subscription = this.pool.subscribeMany(
+      nip29Relays,
+      [filters],
+      {
+        onevent: async (event) => {
+          console.log(`📨 NIP-29 event received [${subscriptionId}]:`, event.kind, event.id.substring(0, 8));
+          
+          switch (event.kind) {
+            case 9: // NIP-29 group message
+              if (onMessage) {
+                console.log('📨 Processing new NIP-29 message in real-time');
+                
+                const message = {
+                  id: event.id,
+                  author: event.pubkey,
+                  content: event.content,
+                  timestamp: event.created_at,
+                  type: 'normal',
+                  protocol: 'nip29',
+                  groupId: groupId,
+                  tags: event.tags || []
+                };
+                
+                // Check for reply references
+                const replyTag = event.tags?.find(tag => tag[0] === 'e' && tag[3] === 'reply');
+                if (replyTag) {
+                  message.replyTo = replyTag[1];
+                }
+                
+                onMessage(message);
+              }
+              break;
+              
+            case 9001: // NIP-29 kick
+            case 9002: // NIP-29 ban
+            case 9003: // NIP-29 admin action
+              if (onModeration) {
+                console.log('🛡️ NIP-29 moderation event received');
+                onModeration(event);
+              }
+              break;
+          }
+        },
+        oneose: () => {
+          console.log(`📨 NIP-29 subscription [${subscriptionId}] end of stored events`);
+        }
+      }
+    );
+    
+    // Return a compatible subscription object
+    return {
+      id: subscriptionId,
+      close: () => {
+        console.log(`🔒 Closing NIP-29 subscription [${subscriptionId}]`);
+        subscription.close();
+      }
+    };
+  }
+
   async sendNIP29GroupMessage(groupId, message, replyTo = null) {
     try {
       console.log('🏛️ Sending NIP-29 group message...');
       
       // Get NIP-29 relays from storage
       const nip29RelaysStored = await AsyncStorage.getItem('nip29_relays');
-      const nip29Relays = nip29RelaysStored ? JSON.parse(nip29RelaysStored) : ['wss://relay.groups.nip29.com'];
+      const nip29Relays = nip29RelaysStored ? JSON.parse(nip29RelaysStored) : NIP29_RELAYS;
       
       if (nip29Relays.length === 0) {
         throw new Error('No NIP-29 relays configured');
@@ -3061,10 +3777,10 @@ class NostrService {
       
       // Create NIP-29 group message event (kind 9)
       const messageEvent = {
-        kind: 9, // NIP-29 group message
+        kind: 9, // NIP-29 group message  
         created_at: Math.floor(Date.now() / 1000),
         tags: [
-          ['h', groupId], // group reference
+          ['h', groupId], // group reference (NIP-29 standard)
         ],
         content: message
         // Note: pubkey will be added by finalizeEvent
@@ -3086,13 +3802,23 @@ class NostrService {
       // Publish to NIP-29 relays
       const finalEvent = finalizeEvent(messageEvent, privateKeyBytes);
       
+      let successCount = 0;
+      let lastError = null;
+      
       for (const relay of nip29Relays) {
         try {
           this.pool.publish([relay], finalEvent);
           console.log(`✅ NIP-29 message sent to ${relay}`);
+          successCount++;
         } catch (relayError) {
           console.warn(`⚠️ Failed to send to ${relay}:`, relayError.message);
+          lastError = relayError;
         }
+      }
+      
+      // If no relays succeeded, fail with clear error message
+      if (successCount === 0) {
+        throw new Error(`Failed to send NIP-29 message: All NIP-29 relays unreachable. NIP-29 groups require specialized relay infrastructure. Last error: ${lastError?.message || 'Unknown error'}`);
       }
       
       return finalEvent;
@@ -3108,7 +3834,7 @@ class NostrService {
       
       // Get NIP-29 relays from storage
       const nip29RelaysStored = await AsyncStorage.getItem('nip29_relays');
-      const nip29Relays = nip29RelaysStored ? JSON.parse(nip29RelaysStored) : ['wss://relay.groups.nip29.com'];
+      const nip29Relays = nip29RelaysStored ? JSON.parse(nip29RelaysStored) : NIP29_RELAYS;
       
       if (nip29Relays.length === 0) {
         throw new Error('No NIP-29 relays configured');
@@ -3119,16 +3845,45 @@ class NostrService {
       
       switch (action) {
         case 'kick':
-        case 'ban':
+        case 'mute':
           moderationEvent = {
-            kind: 9000 + (action === 'kick' ? 1 : 2), // kind 9001 for kick, 9002 for ban
+            kind: 9004, // NIP-29 mute action
             created_at: Math.floor(Date.now() / 1000),
             tags: [
               ['h', groupId], // group reference
               ['p', targetPubkey], // target user
               ['reason', reason] // reason for action
             ],
-            content: reason || `User ${action}ed from group`
+            content: reason || `User muted in group`
+            // Note: pubkey will be added by finalizeEvent
+          };
+          break;
+          
+        case 'unkick':
+        case 'unmute':
+          moderationEvent = {
+            kind: 9005, // NIP-29 unmute action
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [
+              ['h', groupId], // group reference
+              ['p', targetPubkey], // target user
+              ['reason', reason] // reason for action
+            ],
+            content: reason || `User unmuted in group`
+            // Note: pubkey will be added by finalizeEvent
+          };
+          break;
+          
+        case 'ban':
+          moderationEvent = {
+            kind: 9002, // NIP-29 ban action (permanent removal)
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [
+              ['h', groupId], // group reference
+              ['p', targetPubkey], // target user
+              ['reason', reason] // reason for action
+            ],
+            content: reason || `User banned from group`
             // Note: pubkey will be added by finalizeEvent
           };
           break;

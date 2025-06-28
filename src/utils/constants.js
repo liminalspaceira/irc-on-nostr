@@ -46,7 +46,7 @@ export const DEFAULT_RELAYS = [
 // NIP-29 Group Relays (Relay-based Groups with Moderation)
 export const NIP29_RELAYS = [
   'wss://relay.groups.nip29.com',
-  // Add more NIP-29 relays as they become available
+  // Add more legitimate NIP-29 relays as they become available
 ];
 
 // IRC Commands
@@ -65,8 +65,8 @@ export const IRC_COMMANDS = {
   
   // Moderation Commands
   KICK: '/kick',
+  UNKICK: '/unkick',
   BAN: '/ban',
-  UNBAN: '/unban',
   MUTE: '/mute',
   UNMUTE: '/unmute',
   OP: '/op',

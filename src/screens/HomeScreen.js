@@ -8,7 +8,8 @@ import {
   Alert,
   RefreshControl,
   TextInput,
-  ActivityIndicator
+  ActivityIndicator,
+  Modal
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { nostrService } from '../services/NostrService';
@@ -24,6 +25,8 @@ const HomeScreen = ({ navigation, theme = THEMES.DARK }) => {
   const [connectionStatus, setConnectionStatus] = useState({ isConnected: false });
   const [pendingInvitations, setPendingInvitations] = useState(0);
   const [userProfiles, setUserProfiles] = useState(new Map());
+  const [showJoinModal, setShowJoinModal] = useState(false);
+  const [groupIdInput, setGroupIdInput] = useState('');
 
   useEffect(() => {
     initializeAndLoadChannels();
@@ -265,7 +268,8 @@ const HomeScreen = ({ navigation, theme = THEMES.DARK }) => {
       channelId: channel.id,
       channelName: channel.name,
       isPrivate: isPrivate,
-      protocol: protocol
+      protocol: protocol,
+      groupId: channel.groupId // For NIP-29 groups, pass the actual groupId
     });
   };
 
@@ -281,6 +285,55 @@ const HomeScreen = ({ navigation, theme = THEMES.DARK }) => {
 
   const createChannel = () => {
     navigation.navigate('CreateChannel');
+  };
+
+  const showJoinNIP29Modal = () => {
+    setShowJoinModal(true);
+  };
+
+
+  const joinNIP29Group = async () => {
+    if (!groupIdInput.trim()) {
+      Alert.alert('Error', 'Please enter a Group ID');
+      return;
+    }
+
+    try {
+      console.log('🔗 Attempting to join NIP-29 group:', groupIdInput.trim());
+      
+      const result = await nostrService.joinNIP29Group(groupIdInput.trim());
+      
+      console.log('📊 Join result:', result);
+      
+      if (result) {
+        const message = result.alreadyMember 
+          ? 'You are already a member of this NIP-29 group! Refreshing channels to show it...'
+          : 'Your join request has been sent to the NIP-29 relay. You should now be able to see and participate in the group. Refreshing channels...';
+          
+        const title = result.alreadyMember ? 'Already a Member!' : 'Join Request Sent!';
+        
+        Alert.alert(
+          title, 
+          message,
+          [{ 
+            text: 'OK', 
+            onPress: () => {
+              setShowJoinModal(false);
+              setGroupIdInput('');
+              // Wait a moment before refreshing to allow the join request to propagate
+              setTimeout(() => {
+                loadChannels();
+              }, 2000);
+            }
+          }]
+        );
+      } else {
+        Alert.alert('Error', 'Failed to send join request. Please check the Group ID and try again.');
+      }
+    } catch (error) {
+      console.error('❌ Failed to join NIP-29 group:', error);
+      Alert.alert('Error', `Failed to join NIP-29 group: ${error.message || error}`);
+    }
   };
 
   const formatDate = (timestamp) => {
@@ -442,6 +495,14 @@ const HomeScreen = ({ navigation, theme = THEMES.DARK }) => {
             </TouchableOpacity>
           )}
           
+          {/* Join NIP-29 Group Button */}
+          <TouchableOpacity 
+            style={[styles.joinButton, { backgroundColor: theme.successColor }]}
+            onPress={showJoinNIP29Modal}
+          >
+            <Ionicons name="enter-outline" size={20} color="white" />
+          </TouchableOpacity>
+          
           {/* Create Channel Button */}
           <TouchableOpacity 
             style={[styles.createButton, { backgroundColor: theme.primaryColor }]}
@@ -558,22 +619,22 @@ const HomeScreen = ({ navigation, theme = THEMES.DARK }) => {
             
             return (
               <View>
-                {/* NIP-29 Private Groups Section */}
+                {/* NIP-29 Channels Section */}
                 {grouped.nip29.length > 0 && (
                   <View style={styles.section}>
                     <View style={styles.sectionHeader}>
                       <View style={styles.sectionTitleContainer}>
                         <Ionicons name="settings" size={18} color={theme.successColor} />
                         <Text style={[styles.sectionTitle, { color: theme.textColor, marginLeft: 8 }]}>
-                          Private Groups - NIP-29 (Managed)
+                          NIP-29 Channels (Managed)
                         </Text>
                       </View>
                       <Text style={[styles.channelCount, { color: theme.secondaryTextColor }]}>
-                        {grouped.nip29.length} group{grouped.nip29.length !== 1 ? 's' : ''}
+                        {grouped.nip29.length} channel{grouped.nip29.length !== 1 ? 's' : ''}
                       </Text>
                     </View>
                     <Text style={[styles.sectionDescription, { color: theme.secondaryTextColor }]}>
-                      🏛️ Relay-managed groups with real admin controls and moderation
+                      🏛️ Relay-managed channels with real admin controls and moderation (public groups)
                     </Text>
                     {grouped.nip29.map(channel => (
                       <View key={channel.id}>
@@ -590,15 +651,15 @@ const HomeScreen = ({ navigation, theme = THEMES.DARK }) => {
                       <View style={styles.sectionTitleContainer}>
                         <Ionicons name="shield-checkmark" size={18} color={theme.primaryColor} />
                         <Text style={[styles.sectionTitle, { color: theme.textColor, marginLeft: 8 }]}>
-                          Encrypted Groups (E2E Encrypted)
+                          Encrypted Channels (E2E Encrypted)
                         </Text>
                       </View>
                       <Text style={[styles.channelCount, { color: theme.secondaryTextColor }]}>
-                        {grouped.encrypted.length} group{grouped.encrypted.length !== 1 ? 's' : ''}
+                        {grouped.encrypted.length} channel{grouped.encrypted.length !== 1 ? 's' : ''}
                       </Text>
                     </View>
                     <Text style={[styles.sectionDescription, { color: theme.secondaryTextColor }]}>
-                      🔐 End-to-end encrypted messages with shared group secrets
+                      🔐 Invitation-only access, End-to-end encrypted messages with shared group secrets, fake moderation
                     </Text>
                     {grouped.encrypted.map(channel => (
                       <View key={channel.id}>
@@ -648,7 +709,7 @@ const HomeScreen = ({ navigation, theme = THEMES.DARK }) => {
                       </Text>
                     </View>
                     <Text style={[styles.sectionDescription, { color: theme.secondaryTextColor }]}>
-                      # Open channels discoverable by anyone on the Nostr network
+                      # Open channels discoverable by anyone, plain text messages, fake moderation
                     </Text>
                     {grouped.public.map(channel => (
                       <View key={channel.id}>
@@ -671,6 +732,76 @@ const HomeScreen = ({ navigation, theme = THEMES.DARK }) => {
           }
         />
       )}
+
+      {/* Join NIP-29 Group Modal */}
+      <Modal
+        visible={showJoinModal}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowJoinModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContainer, { backgroundColor: theme.cardBackgroundColor }]}>
+            <View style={styles.modalHeader}>
+              <Ionicons 
+                name="enter-outline" 
+                size={48} 
+                color={theme.successColor} 
+              />
+              <Text style={[styles.modalTitle, { color: theme.textColor }]}>
+                Join NIP-29 Group
+              </Text>
+            </View>
+            
+            <Text style={[styles.modalMessage, { color: theme.secondaryTextColor }]}>
+              Enter the Group ID of a NIP-29 group that was created through the relay's web interface.
+            </Text>
+            
+            <View style={styles.inputContainer}>
+              <Text style={[styles.inputLabel, { color: theme.textColor }]}>
+                Group ID *
+              </Text>
+              <TextInput
+                style={[styles.modalInput, { 
+                  backgroundColor: theme.surfaceColor,
+                  color: theme.textColor,
+                  borderColor: theme.borderColor
+                }]}
+                value={groupIdInput}
+                onChangeText={setGroupIdInput}
+                placeholder="Enter Group ID (e.g., 1234567890abcdef...)"
+                placeholderTextColor={theme.secondaryTextColor}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+            </View>
+            
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.modalButton, { backgroundColor: theme.successColor }]}
+                onPress={joinNIP29Group}
+                disabled={!groupIdInput.trim()}
+              >
+                <Text style={[styles.modalButtonText, { color: 'white' }]}>
+                  Join Group
+                </Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity
+                style={[styles.modalButton, { backgroundColor: theme.borderColor }]}
+                onPress={() => {
+                  setShowJoinModal(false);
+                  setGroupIdInput('');
+                }}
+              >
+                <Text style={[styles.modalButtonText, { color: theme.textColor }]}>
+                  Cancel
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 };
@@ -726,6 +857,13 @@ const styles = StyleSheet.create({
     height: 16,
     textAlign: 'center',
     lineHeight: 16,
+  },
+  joinButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   createButton: {
     width: 44,
@@ -896,6 +1034,76 @@ const styles = StyleSheet.create({
     marginHorizontal: 16,
     lineHeight: 16,
     fontStyle: 'italic',
+  },
+  // Modal styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalContainer: {
+    borderRadius: 16,
+    padding: 24,
+    width: '100%',
+    maxWidth: 400,
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+  },
+  modalHeader: {
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginTop: 12,
+    textAlign: 'center',
+  },
+  modalMessage: {
+    fontSize: 16,
+    lineHeight: 22,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  inputContainer: {
+    marginBottom: 20,
+  },
+  inputLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    fontSize: 16,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  modalButton: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  modalButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    letterSpacing: 0.5,
   },
 });
 

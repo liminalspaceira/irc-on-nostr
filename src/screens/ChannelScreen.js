@@ -23,7 +23,7 @@ import { nostrUtils } from '../utils/nostrUtils';
 import { IRC_COMMANDS, BOT_COMMANDS, MESSAGE_TYPES, THEMES } from '../utils/constants';
 
 const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
-  const { channelId, channelName, isPrivate = false, protocol = 'public' } = route.params;
+  const { channelId, channelName, isPrivate = false, protocol = 'public', groupId } = route.params;
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState('');
   const [users, setUsers] = useState([]);
@@ -38,6 +38,11 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [inviteePubkey, setInviteePubkey] = useState('');
   const [inviteMessage, setInviteMessage] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [myFollowing, setMyFollowing] = useState([]);
+  const [followingProfiles, setFollowingProfiles] = useState(new Map());
   const [isPrivateGroup, setIsPrivateGroup] = useState(isPrivate);
   const [channelProtocol, setChannelProtocol] = useState(protocol);
   const flatListRef = useRef();
@@ -52,10 +57,10 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
       title: `${protocolIndicator}${channelName}${operatorIndicator}`,
       headerRight: () => (
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-          {/* Invite button for private groups */}
-          {isPrivateGroup && (
+          {/* Invite button for private groups and NIP-29 groups */}
+          {(isPrivateGroup || channelProtocol === 'nip29') && (
             <TouchableOpacity 
-              onPress={() => setShowInviteModal(true)}
+              onPress={openInviteModal}
               style={{ marginRight: 16 }}
             >
               <Ionicons 
@@ -94,10 +99,32 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
     };
   }, [channelId, isPrivateGroup, channelProtocol]);
 
+  // Debounced search effect for username search
+  useEffect(() => {
+    const delayedSearch = setTimeout(() => {
+      if (searchQuery && followingProfiles.size > 0) {
+        searchFollowingUsers(searchQuery);
+      } else {
+        setSearchResults([]);
+      }
+    }, 300); // 300ms debounce
+
+    return () => clearTimeout(delayedSearch);
+  }, [searchQuery, followingProfiles]);
+
   const loadChannelData = async () => {
     try {
       setIsLoading(true);
-      const channelMessages = await nostrService.queryChannelMessages(channelId, 100);
+      
+      // Use different message loading for NIP-29 groups
+      let channelMessages;
+      if (channelProtocol === 'nip29') {
+        console.log('🏛️ Loading NIP-29 group messages...');
+        channelMessages = await nostrService.queryNIP29GroupMessages(channelId, 100);
+      } else {
+        channelMessages = await nostrService.queryChannelMessages(channelId, 100);
+      }
+      
       setMessages(channelMessages);
       
       // Track users from initial messages
@@ -195,12 +222,21 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
   };
 
   const subscribeToChannel = () => {
-    subscriptionRef.current = nostrService.subscribeToChannel(
-      channelId,
-      onNewMessage,
-      onMetadataUpdate,
-      onModerationEvent
-    );
+    if (channelProtocol === 'nip29') {
+      console.log('🏛️ Setting up NIP-29 group subscription...');
+      subscriptionRef.current = nostrService.subscribeToNIP29Group(
+        channelId,
+        onNewMessage,
+        onModerationEvent
+      );
+    } else {
+      subscriptionRef.current = nostrService.subscribeToChannel(
+        channelId,
+        onNewMessage,
+        onMetadataUpdate,
+        onModerationEvent
+      );
+    }
   };
 
   const setupLocalBotResponseListener = () => {
@@ -530,7 +566,15 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
       console.log('✅ NIP-29 message sent successfully');
     } catch (error) {
       console.error('Error sending NIP-29 message:', error);
-      throw error;
+      
+      // Provide user-friendly error message for NIP-29 specific issues
+      if (error.message.includes('NIP-29 relays unreachable')) {
+        throw new Error('Unable to reach NIP-29 relay servers. NIP-29 groups require specialized infrastructure that appears to be unavailable right now.');
+      } else if (error.message.includes('No NIP-29 relays configured')) {
+        throw new Error('NIP-29 relay configuration missing. Please check your settings.');
+      } else {
+        throw new Error(`Failed to send NIP-29 message: ${error.message}`);
+      }
     }
   };
 
@@ -653,7 +697,7 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
           
           if (channelProtocol === 'nip29') {
             await performNIP29ModerationAction('kick', targetUser, reason);
-            Alert.alert('User Removed', `${targetUser.substring(0, 16)}... has been permanently removed from the NIP-29 group.\n\nThis action is enforced by the relay - the user cannot send messages anymore.`);
+            Alert.alert('User Muted', `${targetUser.substring(0, 16)}... has been muted in the NIP-29 group.\n\nThis action is enforced by the relay - the user cannot send messages until unmuted.\n\nUse /unkick to unmute them.`);
           } else {
             await nostrService.performModerationAction(channelId, 'kick', targetUser, reason);
             const protocolName = channelProtocol === 'private_nip28' ? 'Private NIP-28 channel' : 'public channel';
@@ -672,6 +716,27 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
           }
         } else {
           Alert.alert('Error', 'Usage: /kick <user> [reason]');
+        }
+        break;
+        
+      case 'unkick':
+        if (!userPermissions.canKick) {
+          Alert.alert('Permission Denied', 'You need operator privileges to unkick users');
+          return;
+        }
+        if (command.args.length > 0) {
+          const targetUser = command.args[0];
+          const reason = command.args.slice(1).join(' ') || 'User unmuted';
+          
+          if (channelProtocol === 'nip29') {
+            await performNIP29ModerationAction('unkick', targetUser, reason);
+            Alert.alert('User Unmuted', `${targetUser.substring(0, 16)}... has been unmuted in the NIP-29 group.\n\nThis action is enforced by the relay - the user can now send messages again.`);
+          } else {
+            const protocolName = channelProtocol === 'private_nip28' ? 'Private NIP-28 channel' : 'public channel';
+            Alert.alert('⚠️ No Effect', `This is a ${protocolName} - unkick commands have no effect.\n\nUsers are never actually muted in non-NIP-29 groups, so unmuting does nothing.\n\nOnly NIP-29 groups have real mute/unmute functionality.`);
+          }
+        } else {
+          Alert.alert('Error', 'Usage: /unkick <user> [reason]');
         }
         break;
         
@@ -836,6 +901,134 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
     }
   };
 
+  // Load the current user's following list for user search
+  const loadFollowingList = async () => {
+    try {
+      const currentUserPubkey = nostrService.publicKey;
+      if (!currentUserPubkey) {
+        console.log('❌ No public key found for current user');
+        return;
+      }
+
+      console.log('🔍 Loading following list for user search...');
+      const following = await nostrService.getUserContacts(currentUserPubkey);
+      console.log(`📋 Following list: ${following.length} contacts`, following);
+      setMyFollowing(following);
+
+      if (following.length > 0) {
+        console.log(`👥 Loaded ${following.length} contacts, fetching profiles...`);
+        const profiles = await nostrService.getMultipleUserProfiles(following);
+        console.log(`✅ Loaded ${profiles.size} profiles for search`);
+        
+        // Debug: Log first few profiles
+        let debugCount = 0;
+        for (const [pubkey, profile] of profiles) {
+          if (debugCount < 3) {
+            console.log(`👤 Profile ${debugCount + 1}:`, {
+              pubkey: pubkey.substring(0, 16) + '...',
+              name: profile.name,
+              display_name: profile.display_name
+            });
+            debugCount++;
+          }
+        }
+        
+        setFollowingProfiles(profiles);
+      } else {
+        console.log('📝 No following contacts found');
+      }
+    } catch (error) {
+      console.error('❌ Failed to load following list:', error);
+    }
+  };
+
+  // Search through following users by username/display name
+  const searchFollowingUsers = async (query) => {
+    console.log(`🔍 Searching for: "${query}"`);
+    
+    if (!query.trim()) {
+      console.log('🔍 Empty query, clearing results');
+      setSearchResults([]);
+      return;
+    }
+
+    if (followingProfiles.size === 0) {
+      console.log('⚠️ No following profiles loaded yet');
+      setSearchResults([]);
+      return;
+    }
+
+    setIsSearching(true);
+    try {
+      const normalizedQuery = query.toLowerCase().trim();
+      console.log(`🔍 Normalized query: "${normalizedQuery}"`);
+      console.log(`🔍 Searching through ${followingProfiles.size} profiles...`);
+      
+      const results = [];
+
+      // Search through following profiles
+      for (const [pubkey, profile] of followingProfiles) {
+        const displayName = profile.display_name || profile.name || '';
+        const username = profile.name || '';
+        
+        console.log(`👤 Checking profile: ${displayName || username || 'No name'} (${pubkey.substring(0, 8)}...)`);
+        
+        // Check if query matches display name or username
+        if (displayName.toLowerCase().includes(normalizedQuery) || 
+            username.toLowerCase().includes(normalizedQuery)) {
+          
+          const result = {
+            pubkey,
+            profile,
+            displayName: displayName || username || `User ${pubkey.substring(0, 8)}...`,
+            username: username || pubkey.substring(0, 8) + '...'
+          };
+          
+          results.push(result);
+          console.log(`✅ Match found: ${result.displayName}`);
+        }
+      }
+
+      console.log(`🔍 Search complete: ${results.length} matches found`);
+
+      // Sort by relevance (exact matches first, then partial matches)
+      results.sort((a, b) => {
+        const aExact = a.displayName.toLowerCase() === normalizedQuery || a.username.toLowerCase() === normalizedQuery;
+        const bExact = b.displayName.toLowerCase() === normalizedQuery || b.username.toLowerCase() === normalizedQuery;
+        
+        if (aExact && !bExact) return -1;
+        if (!aExact && bExact) return 1;
+        return a.displayName.localeCompare(b.displayName);
+      });
+
+      const limitedResults = results.slice(0, 10);
+      console.log(`📋 Setting ${limitedResults.length} results`);
+      setSearchResults(limitedResults);
+    } catch (error) {
+      console.error('❌ Error searching following users:', error);
+      setSearchResults([]);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  // Handle user selection from search results
+  const selectUserFromSearch = (user) => {
+    setInviteePubkey(user.pubkey);
+    setSearchQuery(user.displayName);
+    setSearchResults([]);
+  };
+
+  // Reset invite modal state when opening
+  const openInviteModal = () => {
+    setInviteePubkey('');
+    setInviteMessage('');
+    setSearchQuery('');
+    setSearchResults([]);
+    setShowInviteModal(true);
+    loadFollowingList(); // Load following list when modal opens
+  };
+
   const sendGroupInvitation = async () => {
     if (!inviteePubkey.trim()) {
       Alert.alert('Error', 'Please enter a public key or npub');
@@ -862,8 +1055,14 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
         return;
       }
 
-      // Check if this is an encrypted channel that needs key distribution
-      if (channelProtocol === 'encrypted') {
+      // Handle different channel protocols
+      if (channelProtocol === 'nip29') {
+        console.log('🏛️ Sending NIP-29 group invitation...');
+        // Use groupId for NIP-29 groups, fall back to channelId if groupId is not available
+        const nip29GroupId = groupId || channelId;
+        await nostrService.inviteToNIP29Group(nip29GroupId, pubkey, inviteMessage);
+        Alert.alert('Success', 'NIP-29 group invitation sent successfully!');
+      } else if (channelProtocol === 'encrypted') {
         console.log('🔐 Sending encrypted channel invitation with key distribution...');
         
         // Get the current group encryption key
@@ -901,6 +1100,8 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
       setShowInviteModal(false);
       setInviteePubkey('');
       setInviteMessage('');
+      setSearchQuery('');
+      setSearchResults([]);
       
       // Refresh member list
       await loadPrivateGroupMembers();
@@ -924,7 +1125,7 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
           <View style={[styles.modalContainer, { backgroundColor: theme.cardBackgroundColor }]}>
             <View style={styles.modalHeader}>
               <Text style={[styles.modalTitle, { color: theme.textColor }]}>
-                Invite to Private Group
+                {channelProtocol === 'nip29' ? 'Invite to NIP-29 Group' : 'Invite to Private Group'}
               </Text>
               <TouchableOpacity
                 onPress={() => setShowInviteModal(false)}
@@ -934,8 +1135,79 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
               </TouchableOpacity>
             </View>
 
+            {/* Username Search Section */}
             <Text style={[styles.modalLabel, { color: theme.textColor }]}>
-              User Public Key or npub *
+              Search Following Users ({followingProfiles.size} loaded)
+            </Text>
+            <View style={styles.searchContainer}>
+              <TextInput
+                style={[styles.modalInput, {
+                  backgroundColor: theme.surfaceColor,
+                  color: theme.textColor,
+                  borderColor: theme.borderColor,
+                  paddingRight: isSearching ? 50 : 16
+                }]}
+                value={searchQuery}
+                onChangeText={(text) => {
+                  console.log(`📝 Search input changed: "${text}"`);
+                  setSearchQuery(text);
+                  // Also trigger immediate search for testing
+                  if (text.trim() && followingProfiles.size > 0) {
+                    setTimeout(() => searchFollowingUsers(text), 100);
+                  }
+                }}
+                placeholder="Search by username or display name..."
+                placeholderTextColor={theme.secondaryTextColor}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              {isSearching && (
+                <View style={styles.searchLoadingIndicator}>
+                  <ActivityIndicator size="small" color={theme.primaryColor} />
+                </View>
+              )}
+            </View>
+
+            {/* Search Results */}
+            {searchResults.length > 0 && (
+              <ScrollView 
+                style={[styles.searchResults, { backgroundColor: theme.surfaceColor }]}
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator={false}
+              >
+                {searchResults.map((user, index) => (
+                  <TouchableOpacity
+                    key={user.pubkey}
+                    style={[styles.searchResultItem, { 
+                      borderBottomColor: theme.borderColor,
+                      borderBottomWidth: index < searchResults.length - 1 ? 1 : 0
+                    }]}
+                    onPress={() => selectUserFromSearch(user)}
+                  >
+                    <View style={styles.searchResultContent}>
+                      <Text style={[styles.searchResultName, { color: theme.textColor }]}>
+                        {user.displayName}
+                      </Text>
+                      <Text style={[styles.searchResultUsername, { color: theme.secondaryTextColor }]}>
+                        @{user.username}
+                      </Text>
+                      <Text style={[styles.searchResultPubkey, { color: theme.mutedTextColor }]}>
+                        {user.pubkey.substring(0, 16)}...
+                      </Text>
+                    </View>
+                    <Ionicons 
+                      name="person-add" 
+                      size={20} 
+                      color={theme.primaryColor} 
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+
+            {/* Pubkey Input Section */}
+            <Text style={[styles.modalLabel, { color: theme.textColor, marginTop: 16 }]}>
+              Or Enter Public Key/npub *
             </Text>
             <TextInput
               style={[styles.modalInput, {
@@ -951,6 +1223,7 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
               autoCorrect={false}
             />
 
+            {/* Personal Message Section */}
             <Text style={[styles.modalLabel, { color: theme.textColor }]}>
               Personal Message (optional)
             </Text>
@@ -968,6 +1241,7 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
               numberOfLines={3}
             />
 
+            {/* Action Buttons */}
             <View style={styles.modalButtons}>
               <TouchableOpacity
                 style={[styles.modalButton, styles.cancelButton, { backgroundColor: theme.borderColor }]}
@@ -1041,15 +1315,15 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
 
   const showHelp = () => {
     const protocolInfo = channelProtocol === 'nip29' ? 
-      '\n\n🏛️ NIP-29 Group - REAL Moderation:\n• Kick/ban commands ACTUALLY work (both permanently remove)\n• Relay enforces all admin actions\n• Users are truly removed/blocked\n• Operator privileges have real power' :
+      '\n\n🏛️ NIP-29 Group - REAL Moderation:\n• Kick command mutes users (temporary silence)\n• Unkick command unmutes users\n• Ban command permanently removes users\n• Relay enforces all admin actions\n• Operator privileges have real power' :
       channelProtocol === 'private_nip28' ? 
         '\n\n⚠️ Private NIP-28 Channel - FAKE Moderation:\n• Kick/ban commands are visual only\n• No real enforcement - users can still message\n• Encrypted invitations, plain text messages\n• Create NIP-29 group for real moderation' :
         '\n\n# Public Channel - FAKE Moderation:\n• Kick/ban commands are visual only\n• No real enforcement - users can still message\n• Anyone can join and participate\n• Create NIP-29 group for real moderation';
     
     const operatorCommands = userPermissions.isOperator ? 
       (channelProtocol === 'nip29' ? 
-        '\n\n🛡️ Operator Commands (ENFORCED):\n/topic [text] - Set/view channel topic\n/kick [user] [reason] - Permanently remove user\n/ban [user] [reason] - Permanently ban user\n/op [user] - Grant real operator status\n/deop [user] - Remove real operator status' :
-        '\n\n⚠️ Operator Commands (VISUAL ONLY):\n/topic [text] - Set channel topic\n/kick [user] [reason] - Fake removal (no effect)\n/ban [user] [reason] - Fake ban (no effect)\n/op [user] - Fake op status (no power)\n/deop [user] - Fake deop (no effect)\n\n⚠️ These don\'t actually work in non-NIP-29 groups!'
+        '\n\n🛡️ Operator Commands (ENFORCED):\n/topic [text] - Set/view channel topic\n/kick [user] [reason] - Mute user (temporary silence)\n/unkick [user] [reason] - Unmute user\n/ban [user] [reason] - Permanently ban user\n/op [user] - Grant real operator status\n/deop [user] - Remove real operator status' :
+        '\n\n⚠️ Operator Commands (VISUAL ONLY):\n/topic [text] - Set channel topic\n/kick [user] [reason] - Fake mute (no effect)\n/unkick [user] [reason] - Fake unmute (no effect)\n/ban [user] [reason] - Fake ban (no effect)\n/op [user] - Fake op status (no power)\n/deop [user] - Fake deop (no effect)\n\n⚠️ These don\'t actually work in non-NIP-29 groups!'
       ) : 
       '';
     
@@ -1060,7 +1334,8 @@ const ChannelScreen = ({ route, navigation, theme = THEMES.DARK }) => {
 /users - List active channel users
 /msg [username|pubkey|npub] [message] - Send private message
 /topic [text] - Set/view channel topic${operatorCommands ? '' : ' (operators only)'}
-/kick [user] [reason] - Remove user${operatorCommands ? '' : ' (operators only)'}
+/kick [user] [reason] - Mute user${operatorCommands ? '' : ' (operators only)'}
+/unkick [user] [reason] - Unmute user${operatorCommands ? '' : ' (operators only)'}
 /ban [user] [reason] - Ban user${operatorCommands ? '' : ' (operators only)'}
 /op [user] - Grant operator status${operatorCommands ? '' : ' (operators only)'}
 /deop [user] - Remove operator status${operatorCommands ? '' : ' (operators only)'}
@@ -1574,6 +1849,48 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
+  
+  // Search functionality styles for invite modal
+  searchContainer: {
+    position: 'relative',
+  },
+  searchLoadingIndicator: {
+    position: 'absolute',
+    right: 16,
+    top: '50%',
+    transform: [{ translateY: -10 }],
+  },
+  searchResults: {
+    maxHeight: 200,
+    borderRadius: 8,
+    borderWidth: 1,
+    marginTop: 4,
+    marginBottom: 8,
+  },
+  searchResultItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  searchResultContent: {
+    flex: 1,
+  },
+  searchResultName: {
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  searchResultUsername: {
+    fontSize: 14,
+    marginBottom: 2,
+  },
+  searchResultPubkey: {
+    fontSize: 12,
+    fontFamily: 'monospace',
+  },
+  
   // User list styles for private groups
   userListHeaderButtons: {
     flexDirection: 'row',
