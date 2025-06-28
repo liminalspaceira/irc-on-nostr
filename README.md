@@ -219,28 +219,68 @@ npm start
 
 ## Recent Updates (Latest Session)
 
-### 🎯 **Major Feature: Hybrid Private Group System**
+### 🎯 **Major Features: NIP-29 Moderation System & Enhanced User Invitations**
 
-#### ✅ **Completed Implementation**
-1. **Protocol Selection Interface**: Users can choose between Private NIP-28 and NIP-29 when creating private groups
-2. **Dual Relay Management**: Separate relay configuration for NIP-29 groups vs standard Nostr relays
-3. **Visual Protocol Indicators**: Clear badges and icons showing group protocol types
-4. **Real NIP-29 Moderation**: Actual working kick/ban/op commands enforced by NIP-29 relays
-5. **Honest User Feedback**: Clear warnings when moderation commands are fake (non-NIP-29 groups)
-6. **Protocol-Aware Messaging**: Messages route to appropriate relay infrastructure
-7. **Enhanced Help System**: Protocol-specific command explanations and capabilities
+#### ✅ **NIP-29 Moderation System Implementation**
+1. **Proper NIP-29 Moderation Commands**: Implemented real mute/unmute system using NIP-29 protocol
+   - `/kick` command now uses kind 9004 (mute) instead of removal
+   - `/unkick` command added using kind 9005 (unmute) to restore user access
+   - Removed `/unban` command (NIP-29 doesn't support unbanning)
+   - Updated help system to reflect proper NIP-29 moderation capabilities
 
-#### 🏛️ **NIP-29 Implementation Details**
-- **Group Creation**: Uses kind 9007 events with proper group identifiers
-- **Messaging**: Uses kind 9 events published to NIP-29 relays
-- **Moderation Events**: Uses kinds 9001 (kick), 9002 (ban), 9003 (admin actions)
-- **Relay Integration**: Connects to relay.groups.nip29.com and user-configured NIP-29 relays
-- **Real Enforcement**: Users are actually blocked/removed by relay infrastructure
+2. **NIP-29 Group Discovery & Management**: 
+   - Generic group discovery system (no hardcoded group IDs)
+   - Local storage backup for joined groups
+   - Proper metadata fetching and display with group names
+   - Migration system for existing groups
 
-#### ⚖️ **Moderation System Honesty**
+3. **Create Channel Screen Restructuring**:
+   - Moved NIP-29 from "Private Channel" to separate "NIP-29 Group" category
+   - Three distinct channel types: Public Channel, Private Channel, NIP-29 Group
+   - Updated UI to reflect that NIP-29 groups are public channels with relay management
+   - Improved WebView compatibility by switching to Expo Linking API
+   - Dynamic descriptions and form field validation based on channel type
+
+#### ✅ **Enhanced User Invitation System with Username Search**
+4. **Smart User Search for Invitations**:
+   - **Search by Username**: Type display names or usernames to find people you follow
+   - **Following List Integration**: Automatically loads your following list when invite modal opens
+   - **Real-time Search**: 300ms debounced search with instant results
+   - **Visual Search Results**: Shows display name, username, and truncated pubkey
+   - **Tap to Select**: Click search results to auto-fill pubkey field
+
+5. **Dual Input Methods for Invitations**:
+   - **Username Search**: Search through people you follow for easy selection
+   - **Manual Pubkey Entry**: Traditional pubkey/npub input for any user
+   - **Personal Messages**: Add optional invitation messages
+   - **Smart State Management**: Proper cleanup and reset when modal closes
+
+6. **Enhanced User Experience**:
+   - **Loading Indicators**: Shows search progress and number of profiles loaded
+   - **Debug Information**: Console logging for troubleshooting search issues
+   - **Comprehensive Styling**: Professional UI with consistent theming
+   - **Cross-Channel Support**: Works for all channel types (Public, Private, NIP-29)
+
+#### 🏛️ **NIP-29 Technical Implementation**
+- **Mute System**: Uses kind 9004 events for user muting (kick equivalent)
+- **Unmute System**: Uses kind 9005 events for user unmuting (unkick feature)
+- **Group Discovery**: Combines relay queries with local storage for reliable group listing
+- **Metadata Enhancement**: Improved group name display and information fetching
+- **Linking Integration**: External NIP-29 group creation via relay.groups.nip29.com
+
+#### 🔍 **User Search Technical Details**
+- **Following List Loading**: Fetches user's contact list (kind 3 events) from Nostr relays
+- **Profile Batch Loading**: Efficiently loads multiple user profiles for search
+- **Fuzzy Search**: Matches both display_name and name fields with partial matching
+- **Search Optimization**: Limits results to 10 for performance, sorts by relevance
+- **Cache Integration**: Leverages existing profile caching system for performance
+
+#### ⚖️ **Updated Moderation System**
 - **NIP-29 Groups**: 
-  - ✅ "User permanently removed from NIP-29 group. Action enforced by relay."
-  - ✅ Real admin powers that actually work
+  - ✅ `/kick` = Mute user (kind 9004) - prevents posting but allows viewing
+  - ✅ `/unkick` = Unmute user (kind 9005) - restores posting privileges
+  - ✅ `/ban` = Permanent removal (kind 9002) - complete group removal
+  - ❌ `/unban` = Not supported in NIP-29 protocol (removed from commands)
 - **Private NIP-28/Public Groups**: 
   - ⚠️ "FAKE MODERATION: User can still send messages. Use NIP-29 for real moderation."
   - Clear warnings that commands have no effect
